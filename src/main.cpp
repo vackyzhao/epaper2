@@ -3,31 +3,33 @@
 #include <imagedata.h>
 
 #include <Wire.h>
-#include <EEPROM.h>
 #include <limits.h>
 
 #include <avr/sleep.h>
 #include <avr/power.h>
 #include <avr/interrupt.h>
+
 #include <battery_monitor.h>
+#include <eeprom_utils.h>
+#include <display_utils.h>
 
-#include <EEPROM.h>
 #include <RTClib.h>
-
-
-
+#include <globals.h>
 
 #define PMOS_CTRL_PIN 5
 #define SERIAL_BUFFER_SIZE 128
-#define COLORED 0
-#define UNCOLORED 1
+
+#define COUNTDOWN_EXAM 0
+#define COUNTDOWN_MEET 1
 
 char serialBuffer[SERIAL_BUFFER_SIZE];
-unsigned char image[512];
-Paint paint(image, 0, 0);  // width should be the multiple of 8
 
 RTC_DS3231 rtc;
 Epd epd;
+unsigned char image[512];
+Paint paint(image, 0, 0);  // width should be the multiple of 8
+
+
 bool firstFlag = true;  // 用于第一次显示时间时的特殊处理
 volatile bool wakeUp = false;
 volatile bool alarmTriggered = false;
@@ -50,31 +52,13 @@ const uint8_t TASK_MINUTE = 5;    // 固定在 xx:05
 static uint8_t lastTaskDay = 0xFF;
 static int8_t lastTaskHour = -1;
 
-void displayTime(DateTime now) ;
 
-enum SystemState {
-  STATE_EXAM_COUNTDOWN,
-  STATE_MEET_COUNTDOWN,
-  STATE_FOCUS_PAUSED,
-  STATE_FOCUS_RUNNING,
-  STATE_MQTT_MESSAGE,
-  STATE_LOW_BATTERY
-};
-enum EventType {
-  EVENT_BUTTON1,
-  EVENT_BUTTON2,
-  EVENT_BUTTON3
-};
+
 
 SystemState currentState = STATE_EXAM_COUNTDOWN;
 SystemState lastState = STATE_EXAM_COUNTDOWN;
 
-
-void drawicon(int status);
-void drawFocus(int status);
-void drawLowBatteryUI();
 void setupNextAlarm();
-
 
 
 void checkMessages(void) {
@@ -115,91 +99,6 @@ void checkMessages(void) {
   digitalWrite(PMOS_CTRL_PIN, HIGH);  // 打开电源
 }
 
-
-void saveTotalMin(uint32_t totalMin) {
-  const uint16_t addr_magic = 0x30;
-  const uint8_t magic_val = 0xA6;
-  const uint16_t addr_data = 0x31;
-
-  EEPROM.update(addr_magic, magic_val);
-
-  for (uint8_t i = 0; i < 4; ++i) {
-    EEPROM.update(addr_data + i, (totalMin >> (8 * i)) & 0xFF);
-  }
-  //debugSerial.print("save: ");
-  //debugSerial.println(totalMin);
-}
-bool loadTotalMin(uint32_t &totalMin) {
-  const uint16_t addr_magic = 0x30;
-  const uint8_t magic_val = 0xA6;
-  const uint16_t addr_data = 0x31;
-
-  if (EEPROM.read(addr_magic) != magic_val) {
-    totalMin = 0;
-    return false;
-  }
-
-  totalMin = 0;
-  for (uint8_t i = 0; i < 4; ++i) {
-    totalMin |= ((uint32_t)EEPROM.read(addr_data + i)) << (8 * i);
-  }
-  //debugSerial.print("load: ");
-  //debugSerial.println(totalMin);
-  return true;
-}
-
-
-
-// 读取：从固定地址取 MAGIC/YY/MM/DD，成功则写入 out（year = 2000 + YY）
-bool eepromLoadTarget(DateTime &out) {
-  const uint16_t addr = 0x0020;    // 存放地址（可改）
-  const uint8_t magicWant = 0xA5;  // MAGIC（可改）
-  const uint16_t baseYear = 2000;
-
-  if (addr + 3 >= EEPROM.length())
-    return false;  // 越界保护
-
-  if (EEPROM.read(addr + 0) != magicWant)
-    return false;
-  const uint8_t yy = EEPROM.read(addr + 1);
-  const uint8_t mm = EEPROM.read(addr + 2);
-  const uint8_t dd = EEPROM.read(addr + 3);
-
-  if (mm < 1 || mm > 12 || dd < 1 || dd > 31)
-    return false;
-
-  out = DateTime((uint16_t)(baseYear + yy), mm, dd);
-  return true;
-}
-
-// 写入：把 DateTime 压缩成 YY/MM/DD + MAGIC 存到固定地址
-void eepromSaveTarget(const DateTime &dt) {
-  const uint16_t addr = 0x0020;    // 存放地址（可改）
-  const uint8_t magicWant = 0xA5;  // MAGIC（可改）
-  const uint16_t baseYear = 2000;
-
-  if (addr + 3 >= EEPROM.length())
-    return;  // 越界保护
-
-  uint16_t y = dt.year();
-  uint8_t m = dt.month();
-  uint8_t d = dt.day();
-
-  // 合法性与夹取
-  if (y < baseYear)
-    y = baseYear;
-  uint8_t yy = (uint8_t)((y - baseYear) > 255 ? 255 : (y - baseYear));
-  if (m < 1 || m > 12)
-    m = 1;
-  if (d < 1 || d > 31)
-    d = 1;
-
-  EEPROM.update(addr + 0, magicWant);
-  EEPROM.update(addr + 1, yy);
-  EEPROM.update(addr + 2, m);
-  EEPROM.update(addr + 3, d);
-}
-
 void switchState(EventType event) {
   // 状态迁移逻辑：输入事件 + 当前状态 => 下一个状态
   lastState = currentState;
@@ -223,7 +122,7 @@ void switchState(EventType event) {
       break;
 
     case STATE_FOCUS_RUNNING:
-      saveTotalMin(totalMin);
+      eepromSaveTotalMinutes(totalMin);
       if (event == EVENT_BUTTON1)
         currentState = STATE_EXAM_COUNTDOWN;
       else if (event == EVENT_BUTTON2)
@@ -233,7 +132,7 @@ void switchState(EventType event) {
       break;
 
     case STATE_FOCUS_PAUSED:
-      saveTotalMin(totalMin);
+      eepromSaveTotalMinutes(totalMin);
       if (event == EVENT_BUTTON1)
         currentState = STATE_EXAM_COUNTDOWN;
       else if (event == EVENT_BUTTON2)
@@ -259,28 +158,28 @@ void switchState(EventType event) {
   // 界面更新（集中统一）
   switch (currentState) {
     case STATE_EXAM_COUNTDOWN:
-      drawicon(0);
+      initCountdownPanel(0);
       epd.DisplayFrame(); 
-      displayTime(rtc.now());
+      //displayTime(rtc.now());
       break;
     case STATE_MEET_COUNTDOWN:
-      drawicon(1);
+      initCountdownPanel(1);
       epd.DisplayFrame(); 
-      displayTime(rtc.now());
+      //displayTime(rtc.now());
       break;
     case STATE_FOCUS_PAUSED:
-      saveTotalMin(totalMin);
-      drawFocus(0);
+      eepromSaveTotalMinutes(totalMin);
+      //drawFocus(0);
       break;
     case STATE_FOCUS_RUNNING:
-      loadTotalMin(totalMin);
-      drawFocus(1);
+      eepromLoadTotalMinutes(totalMin);
+      //drawFocus(1);
       break;
     case STATE_MQTT_MESSAGE:
-      checkMessages();
+      //checkMessages();
       break;
     case STATE_LOW_BATTERY:
-      drawLowBatteryUI();
+      renderLowBatteryScreen();
       break;
   }
 }
@@ -309,130 +208,6 @@ ISR(PCINT1_vect) {
   }
 }
 
-void displayFocus(DateTime now) {
-  epd.Init();
-
-  char timeBuf[6];  // "HH:MM"
-  snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", now.hour(), now.minute());
-
-  // 设置画布方向和大小（适合竖直文字）
-  paint.SetWidth(14);          // 字体宽度为 32px
-  paint.SetHeight(148);        // 高度为 96px，容纳整个文字
-  paint.SetRotate(ROTATE_90);  // 顺时针旋转 90°，竖排
-
-  // 第一步：清空旧内容
-  epd.SetPartialRefresh();
-  paint.Clear(UNCOLORED);
-  epd.SetFrameMemory_Partial_NoRefresh(paint.GetImage(), 110, 180, paint.GetWidth(), paint.GetHeight());
-  epd.SetFrameMemory_Partial_NoRefresh(paint.GetImage(), 50, 180, paint.GetWidth(), paint.GetHeight());
-  epd.SetFrameMemory_Partial_NoRefresh(paint.GetImage(), 10, 180, paint.GetWidth(), paint.GetHeight());
-
-  paint.SetWidth(32);          // 字体宽度为 32px
-  paint.SetHeight(32);         // 高度为 96px，容纳整个文字
-  paint.SetRotate(ROTATE_90);  // 顺时针旋转 90°，竖排
-
-  if (currentState == STATE_FOCUS_RUNNING) {
-    if (lastState != STATE_FOCUS_RUNNING) {
-      paint.Clear(UNCOLORED);
-      epd.SetFrameMemory_Partial_NoRefresh(paint.GetImage(), 30, 10, paint.GetWidth(), paint.GetHeight());
-    }
-  } else if (currentState == STATE_FOCUS_PAUSED) {
-    if (lastState != STATE_FOCUS_PAUSED) {
-      paint.Clear(UNCOLORED);
-      epd.SetFrameMemory_Partial_NoRefresh(paint.GetImage(), 30, 10, paint.GetWidth(), paint.GetHeight());
-    }
-  }
-
-  epd.DisplayFrame_Partial();
-  delay(100);  // 延迟用于防止残影和刷新干扰
-
-  char todayStr[16];  // e.g., "1h 23m"
-  char totalStr[16];  // e.g., "54h 01m"
-
-  paint.SetWidth(32);          // 字体宽度为 32px
-  paint.SetHeight(32);         // 高度为 96px，容纳整个文字
-  paint.SetRotate(ROTATE_90);  // 顺时针旋转 90°，竖排
-
-  if (currentState == STATE_FOCUS_RUNNING) {
-    todayMin += 1;  // 每分钟增加1
-    totalMin += 1;
-
-    paint.Clear(UNCOLORED);
-    epd.SetPartialRefresh();
-    paint.DrawStringAt(0, 0, " ", &Font00, COLORED);
-    epd.SetFrameMemory_Partial_NoRefresh(paint.GetImage(), 30, 10, paint.GetWidth(), paint.GetHeight());
-
-  } else if (currentState == STATE_FOCUS_PAUSED) {
-    paint.Clear(UNCOLORED);
-    epd.SetPartialRefresh();
-    paint.DrawFilledRectangle(6, 4, 12, 28, COLORED);   // 左条
-    paint.DrawFilledRectangle(20, 4, 26, 28, COLORED);  // 右条
-    epd.SetFrameMemory_Partial_NoRefresh(paint.GetImage(), 30, 10, paint.GetWidth(), paint.GetHeight());
-    // 暂停状态不增加计时
-  }
-
-
-  // 第二步：绘制新时间
-  // 设置画布方向和大小（适合竖直文字）
-  paint.SetWidth(14);          // 字体宽度为 32px
-  paint.SetHeight(148);        // 高度为 96px，容纳整个文字
-  paint.SetRotate(ROTATE_90);  // 顺时针旋转 90°，竖排
-  paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, timeBuf, &Font20, COLORED);
-  epd.SetFrameMemory_Partial_NoRefresh(paint.GetImage(), 110, 180, paint.GetWidth(), paint.GetHeight());
-  paint.Clear(UNCOLORED);
-  snprintf(todayStr, sizeof(todayStr), "%uh %02um", todayMin / 60, todayMin % 60);
-  paint.DrawStringAt(0, 0, todayStr, &Font20, COLORED);
-  epd.SetFrameMemory_Partial_NoRefresh(paint.GetImage(), 50, 160, paint.GetWidth(), paint.GetHeight());
-  paint.Clear(UNCOLORED);
-  snprintf(totalStr, sizeof(totalStr), "%luh %02lum", totalMin / 60, totalMin % 60);
-  paint.DrawStringAt(0, 0, totalStr, &Font20, COLORED);
-  epd.SetFrameMemory_Partial_NoRefresh(paint.GetImage(), 10, 160, paint.GetWidth(), paint.GetHeight());
-  paint.Clear(UNCOLORED);
-  epd.DisplayFrame_Partial();
-  delay(100);
-  epd.Sleep();
-  delay(100);
-}
-
-void displayTime(DateTime now) {
-  epd.Init();
-  char timeBuf[6];  // "HH:MM"
-  snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", now.hour(), now.minute());
-
-  // 设置画布方向和大小（适合竖直文字）
-  paint.SetWidth(32);          // 字体宽度为 32px
-  paint.SetHeight(96);         // 高度为 96px，容纳整个文字
-  paint.SetRotate(ROTATE_90);  // 顺时针旋转 90°，竖排
-
-  if(firstFlag==true) {
-    firstFlag=false;
-  } else {
-    paint.Clear(UNCOLORED);
-    paint.DrawStringAt(0, 4, timeBuf_old, &Font20, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 64, 168, paint.GetWidth(), paint.GetHeight());//设置上一次的base
-  }
-
-
-  // 第一步：清空旧内容
-  paint.Clear(UNCOLORED);
-  epd.SetFrameMemory_Partial(paint.GetImage(), 64, 168, paint.GetWidth(), paint.GetHeight());
-  epd.DisplayFrame_Partial();
-  delay(1000);  // 延迟用于防止残影和刷新干扰
-
-
-  // 第二步：绘制新时间
-  paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 4, timeBuf, &Font20, COLORED);
-  epd.SetFrameMemory_Partial(paint.GetImage(), 64, 168, paint.GetWidth(), paint.GetHeight());
-  epd.DisplayFrame_Partial();
-  delay(300);
-  epd.Sleep();
-  delay(100);
-  strcpy(timeBuf_old, timeBuf);  // 复制内容
-
-}
-
 void handleRtcAlarmEvent() {
 
   rtc.clearAlarm(1);  // 清除 DS3231 的闹钟中断标志
@@ -443,9 +218,9 @@ void handleRtcAlarmEvent() {
     lastDay = now.day();                  // 更新记录
     currentState = STATE_EXAM_COUNTDOWN;  // 重置状态为考试倒计时
     todayMin = 0;                         // 重置今天的分钟数
-    drawicon(0);
+    initCountdownPanel(0);
     epd.DisplayFrame(); 
-    displayTime(now);                     // 显示当前时间
+    //displayTime(now);                     // 显示当前时间
     setupNextAlarm();  // 设置下一分钟的闹钟
     return;            // 直接返回，不再继续执行
   }
@@ -457,26 +232,26 @@ void handleRtcAlarmEvent() {
   ) {
     lastTaskDay = now.day();
     lastTaskHour = now.hour();
-    checkMessages();
+    //checkMessages();
   }
 
 
   switch (currentState) {
     case STATE_EXAM_COUNTDOWN:
-    drawicon(0);
-    displayTime(now);
+    initCountdownPanel(0);
+    //displayTime(now);
     break;
 
     case STATE_MEET_COUNTDOWN:
-    drawicon(1);
-    displayTime(now);
+    initCountdownPanel(1);
+    //displayTime(now);
     break;
     
     case STATE_FOCUS_PAUSED:
-      displayFocus(now);
+      //displayFocus(now);
       break;
     case STATE_FOCUS_RUNNING:
-      displayFocus(now);
+      //displayFocus(now);
       break;
     case STATE_MQTT_MESSAGE:
 
@@ -501,155 +276,6 @@ void enterDeepSleep() {
 
   sleep_cpu();      // 💥 实际进入掉电睡眠
   sleep_disable();  // 🛌 醒来后清除睡眠允许标志
-}
-
-void drawLowBatteryUI() {
-  epd.SetFrameMemory_Base(IMAGE_DATA);
-  epd.SetFrameMemory_WhiteBase(0, 128, 128, 168);
-  epd.DisplayFrame();
-
-  delay(5000);
-  //debugSerial.println("sleep...");
-  epd.Sleep();
-  delay(100);
-}
-void drawFocus(int status) {
-  
-  if ((lastState != STATE_FOCUS_RUNNING) && (lastState != STATE_FOCUS_PAUSED)) {
-    firstFlag = true;
-    epd.Init();
-    epd.SetFrameMemory_WhiteBase(0, 0, 128, 296);
-    paint.SetWidth(14);
-    paint.SetHeight(148);
-    paint.SetRotate(ROTATE_90);
-    paint.Clear(UNCOLORED);
-    paint.DrawStringAt(0, 0, "Focus Mode", &Font20, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 110, 20, paint.GetWidth(), paint.GetHeight());
-    paint.Clear(UNCOLORED);
-    paint.DrawStringAt(0, 0, "Today:", &Font20, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 50, 60, paint.GetWidth(), paint.GetHeight());
-    paint.Clear(UNCOLORED);
-    paint.DrawStringAt(0, 0, "Total:", &Font20, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 10, 60, paint.GetWidth(), paint.GetHeight());
-    epd.DisplayFrame();  // 刷新
-  }
-
-  DateTime now = rtc.now();
-  displayFocus(now);
-}
-
-void drawicon(int status) {
-  firstFlag = true;
-  epd.Init();
-  // epd.ClearFrameMemory(0xFF);
-  DateTime now = rtc.now();
-  DateTime target(2025, 12, 20);                       // 目标时间
-  DateTime now00(now.year(), now.month(), now.day());  // 时分秒默认 0
-  TimeSpan remaining = target - now00;
-  int days_left = remaining.days();  // 剩余天数
-  if (days_left < 0)
-    days_left = 0;  // 已经过了，设为0天
-  int hundreds = days_left / 100;
-  int tens = (days_left / 10) % 10;
-  int units = days_left % 10;
-
-  epd.SetFrameMemory_Base(IMAGE_DATA_ICON);  // 居中绘图标
-  epd.SetFrameMemory_WhiteBase(0, 128, 128, 168);
-  paint.SetWidth(14);
-  paint.SetHeight(148);
-  paint.SetRotate(ROTATE_90);
-  /* For simplicity, the arguments are explicit numerical coordinates */
-  char dateBuf[11];  // "2025-07-23"
-  snprintf(dateBuf, sizeof(dateBuf), "%04d-%02d-%02d", now.year(), now.month(), now.day());
-  paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 1, dateBuf, &Font20, COLORED);
-  epd.SetFrameMemory_Base(paint.GetImage(), 110, 140, paint.GetWidth(), paint.GetHeight());
-
-  paint.SetWidth(64);
-  paint.SetHeight(33);
-  paint.SetRotate(ROTATE_90);
-  paint.Clear(UNCOLORED);
-
-  if (status == 0) {
-    paint.DrawCharFromZeroAt(0, 0, units, &Font36, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 1, 196, paint.GetWidth(), paint.GetHeight());
-
-    paint.Clear(UNCOLORED);
-    paint.DrawCharFromZeroAt(0, 0, tens, &Font36, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 1, 163, paint.GetWidth(), paint.GetHeight());
-
-    paint.Clear(UNCOLORED);
-    paint.DrawCharFromZeroAt(0, 0, hundreds, &Font36, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 1, 130, paint.GetWidth(), paint.GetHeight());
-
-    paint.SetWidth(16);
-    paint.SetHeight(80);
-    paint.SetRotate(ROTATE_90);
-    paint.Clear(UNCOLORED);
-
-    // 判断显示 DAY 或 DAYS
-    if (days_left == 1) {
-      paint.DrawStringAt(0, 0, "DAY", &Font20, COLORED);
-    } else {
-      paint.DrawStringAt(0, 0, "DAYS", &Font20, COLORED);
-    }
-    epd.SetFrameMemory_Base(paint.GetImage(), 45, 230, paint.GetWidth(), paint.GetHeight());
-
-    paint.Clear(UNCOLORED);
-
-    paint.DrawStringAt(0, 0, "TO", &Font20, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 30, 230, paint.GetWidth(), paint.GetHeight());
-
-    paint.Clear(UNCOLORED);
-    paint.DrawStringAt(0, 0, "EXAM", &Font20, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 10, 230, paint.GetWidth(), paint.GetHeight());
-  } else {
-
-    eepromLoadTarget(target);
-    remaining = target - now00;
-    days_left = remaining.days();  // 剩余天数
-    if (days_left < 0)
-      days_left = 0;  // 已经过了，设为0天
-    hundreds = days_left / 100;
-    tens = (days_left / 10) % 10;
-    units = days_left % 10;
-
-    paint.DrawCharFromZeroAt(0, 0, units, &Font36, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 1, 196, paint.GetWidth(), paint.GetHeight());
-
-    paint.Clear(UNCOLORED);
-    paint.DrawCharFromZeroAt(0, 0, tens, &Font36, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 1, 163, paint.GetWidth(), paint.GetHeight());
-
-    paint.Clear(UNCOLORED);
-    paint.DrawCharFromZeroAt(0, 0, hundreds, &Font36, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 1, 130, paint.GetWidth(), paint.GetHeight());
-
-    paint.SetWidth(16);
-    paint.SetHeight(80);
-    paint.SetRotate(ROTATE_90);
-    paint.Clear(UNCOLORED);
-
-    paint.DrawStringAt(0, 0, "DAYS", &Font20, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 45, 230, paint.GetWidth(), paint.GetHeight());
-
-    paint.Clear(UNCOLORED);
-    paint.DrawStringAt(0, 0, "MEET", &Font20, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 30, 230, paint.GetWidth(), paint.GetHeight());
-
-    paint.Clear(UNCOLORED);
-    paint.DrawStringAt(0, 0, "ZCQ", &Font20, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 10, 230, paint.GetWidth(), paint.GetHeight());
-  }
-  /*
-  if(lastState != STATE_EXAM_COUNTDOWN && lastState != STATE_MEET_COUNTDOWN) {
-    epd.DisplayFrame();  // 刷新全部
-  }
-  
-  delay(200);
-
-  now = rtc.now();
-  displayTime(now);*/
 }
 
 void setupNextAlarm() {
@@ -689,14 +315,9 @@ void setupNextAlarm() {
 }
 
 void setup() {
-  // put your setup code here, to run once:
   Serial.begin(115200);
-  //debugSerial.begin(115200);
-
   pinMode(PMOS_CTRL_PIN, OUTPUT);
-
   digitalWrite(PMOS_CTRL_PIN, HIGH);  // 初始状态关电源（截止）
-
 
   // 配置 D2、D3 为上拉输入
   pinMode(2, INPUT_PULLUP);              // INT0
@@ -708,24 +329,19 @@ void setup() {
   PCMSK1 |= (1 << PCINT9);               // 允许 A1（PC1）电平变化触发中断
 
   Wire.begin();
-  //debugSerial.println("Serial Begin");
   delay(10);
   epd.Init();
-  epd.ClearFrameMemory(0xFF);  // bit set = white, bit reset = black
+  epd.ClearFrameMemory(0xFF);  // 全白刷新屏幕
   epd.DisplayFrame();
   delay(100);
 
-  batteryMonitorBegin();  // 初始化
+  batteryMonitorBegin();  // 初始化电量检测
   uint16_t batteryVoltage = readBatteryVoltage_mv();
-  if (batteryVoltage < 820) {
-    //debugSerial.println("Low Battery, Entering Low Battery Mode");
+  if (batteryVoltage < 820) //820*3.69=3038mV
+  {
     currentState = STATE_LOW_BATTERY;
-    drawLowBatteryUI();
+    renderLowBatteryScreen();
     enterDeepSleep();  // 进入深度睡眠
-  } else {
-    //debugSerial.print("Battery Voltage: ");
-    //debugSerial.print(batteryVoltage);
-    //debugSerial.println(" mV");
   }
   if (!rtc.begin()) {
     while (1)
@@ -738,14 +354,18 @@ void setup() {
   PCICR |= (1 << PCIE0);    // 使能 Port B（PB0–PB7）的 PCINT 中断
   PCMSK0 |= (1 << PCINT5);  // 启用 D13 的 PCINT
 
-  drawicon(0);
+  eepromSaveTargetDate(DateTime(2025, 8, 12));
+  //initCountdownPanel(COUNTDOWN_EXAM);
+  initCountdownPanel(COUNTDOWN_MEET);
   epd.DisplayFrame(); 
-  displayTime(rtc.now());  // 显示当前时间
-  setupNextAlarm();
+  //displayTime(rtc.now());  // 显示当前时间
+  //setupNextAlarm();
 
-  lastDisplayTime = rtc.now();
-  eepromSaveTarget(DateTime(2025, 07, 30));
-  loadTotalMin(totalMin);
+  //lastDisplayTime = rtc.now();
+  //eepromSaveTargetDate(DateTime(2025, 08, 30));
+  //eepromLoadTotalMinutes(totalMin);
+
+  
 }
 
 void loop() {
