@@ -54,6 +54,14 @@ public:
         int image_height
     );
 
+    void SetFrameMemory_Old(
+        const unsigned char* image_buffer,
+        int x,
+        int y,
+        int image_width,
+        int image_height
+    );
+
     void SetFrameMemory_Base(
         const unsigned char* image_buffer,
         int x,

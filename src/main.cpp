@@ -30,6 +30,7 @@ unsigned char image[512];
 Paint paint(image, 0, 0);  // width should be the multiple of 8
 
 
+
 bool firstFlag = true;  // 用于第一次显示时间时的特殊处理
 volatile bool wakeUp = false;
 volatile bool alarmTriggered = false;
@@ -41,7 +42,7 @@ DateTime lastDisplayTime;  // 全局变量，记录上一次显示的时间（�
 uint8_t lastDay = 255;
 uint16_t todayMin = 0;
 uint32_t totalMin = 0;
- char timeBuf_old[6];
+char timeBuf_old[6];
 
 // ——— 任务调度参数 ———
 const uint8_t TASK_BASE_H = 2;    // 起点小时 2 (= 02:05)
@@ -160,11 +161,13 @@ void switchState(EventType event) {
     case STATE_EXAM_COUNTDOWN:
       initCountdownPanel(0);
       epd.DisplayFrame(); 
+      renderClockPanel(&rtc.now(), &firstFlag, timeBuf_old);
       //displayTime(rtc.now());
       break;
     case STATE_MEET_COUNTDOWN:
       initCountdownPanel(1);
       epd.DisplayFrame(); 
+      renderClockPanel(&rtc.now(), &firstFlag, timeBuf_old);
       //displayTime(rtc.now());
       break;
     case STATE_FOCUS_PAUSED:
@@ -239,11 +242,13 @@ void handleRtcAlarmEvent() {
   switch (currentState) {
     case STATE_EXAM_COUNTDOWN:
     initCountdownPanel(0);
+    renderClockPanel(&now, &firstFlag, timeBuf_old);
     //displayTime(now);
     break;
 
     case STATE_MEET_COUNTDOWN:
     initCountdownPanel(1);
+    renderClockPanel(&now, &firstFlag, timeBuf_old);
     //displayTime(now);
     break;
     
@@ -355,13 +360,13 @@ void setup() {
   PCMSK0 |= (1 << PCINT5);  // 启用 D13 的 PCINT
 
   eepromSaveTargetDate(DateTime(2025, 8, 12));
-  //initCountdownPanel(COUNTDOWN_EXAM);
-  initCountdownPanel(COUNTDOWN_MEET);
+  initCountdownPanel(COUNTDOWN_EXAM);
   epd.DisplayFrame(); 
+  renderClockPanel(&rtc.now(), &firstFlag, timeBuf_old);
   //displayTime(rtc.now());  // 显示当前时间
-  //setupNextAlarm();
+  setupNextAlarm();
 
-  //lastDisplayTime = rtc.now();
+  lastDisplayTime = rtc.now();
   //eepromSaveTargetDate(DateTime(2025, 08, 30));
   //eepromLoadTotalMinutes(totalMin);
 

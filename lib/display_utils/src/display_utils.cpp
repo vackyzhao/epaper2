@@ -8,6 +8,8 @@ extern RTC_DS3231 rtc;
 extern Epd epd;
 extern Paint paint;
 
+
+//渲染并且写入新旧显存，不显示
 void initCountdownPanel(int status) {
   epd.Init();
   DateTime now = rtc.now();
@@ -171,9 +173,9 @@ void renderClockPanel(const DateTime* now, bool* firstFlag, char* timeBuf_old) {
   } else {
     paint.Clear(UNCOLORED);
     paint.DrawStringAt(0, 4, timeBuf_old, &Font20, COLORED);
-    epd.SetFrameMemory_Base(paint.GetImage(), 64, 168, paint.GetWidth(), paint.GetHeight());
+    epd.SetFrameMemory_Old(paint.GetImage(), 64, 168, paint.GetWidth(), paint.GetHeight());
   }
-
+  delay(100);
   paint.Clear(UNCOLORED);
   epd.SetFrameMemory_Partial(paint.GetImage(), 64, 168, paint.GetWidth(), paint.GetHeight());
   epd.DisplayFrame_Partial();
@@ -186,6 +188,9 @@ void renderClockPanel(const DateTime* now, bool* firstFlag, char* timeBuf_old) {
   epd.Sleep();
   strcpy(timeBuf_old, timeBuf);
 }
+
+
+
 
 void renderLowBatteryScreen() {
   epd.SetFrameMemory_Base(IMAGE_DATA);
