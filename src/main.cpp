@@ -15,7 +15,7 @@
 
 #include <RTClib.h>
 #include <globals.h>
-
+#include <avr/wdt.h>
 #define PMOS_CTRL_PIN 5
 #define SERIAL_BUFFER_SIZE 128
 
@@ -61,7 +61,11 @@ SystemState lastState = STATE_EXAM_COUNTDOWN;
 
 void setupNextAlarm();
 
-
+void reset() {
+  // 启动看门狗定时器，设定一个短的超时时间（15ms）
+  wdt_enable(WDTO_15MS);  
+  while(1);  // 等待看门狗超时并复位设备
+}
 void checkMessages(void) {
   uint16_t voltage = readBatteryVoltage_mv(5);
   digitalWrite(PMOS_CTRL_PIN, LOW);  // 打开电源
@@ -225,6 +229,7 @@ void handleRtcAlarmEvent() {
     epd.DisplayFrame(); 
     //displayTime(now);                     // 显示当前时间
     setupNextAlarm();  // 设置下一分钟的闹钟
+    reset();
     return;            // 直接返回，不再继续执行
   }
 
@@ -359,7 +364,9 @@ void setup() {
   PCICR |= (1 << PCIE0);    // 使能 Port B（PB0–PB7）的 PCINT 中断
   PCMSK0 |= (1 << PCINT5);  // 启用 D13 的 PCINT
 
-  eepromSaveTargetDate(DateTime(2025, 8, 12));
+  DateTime now = rtc.now();
+  lastDay = now.day(); 
+  //eepromSaveTargetDate(DateTime(2025, 8, 12));
   initCountdownPanel(COUNTDOWN_EXAM);
   epd.DisplayFrame(); 
   renderClockPanel(&rtc.now(), &firstFlag, timeBuf_old);
@@ -367,8 +374,8 @@ void setup() {
   setupNextAlarm();
 
   lastDisplayTime = rtc.now();
-  //eepromSaveTargetDate(DateTime(2025, 08, 30));
-  //eepromLoadTotalMinutes(totalMin);
+  eepromSaveTargetDate(DateTime(2025, 9, 1));
+  eepromLoadTotalMinutes(totalMin);
 
   
 }
