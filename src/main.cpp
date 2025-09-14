@@ -21,7 +21,7 @@
 
 #define COUNTDOWN_EXAM 0
 #define COUNTDOWN_MEET 1
-
+static char g_echoBuf[20]; 
 char serialBuffer[SERIAL_BUFFER_SIZE];
 
 RTC_DS3231 rtc;
@@ -68,6 +68,7 @@ void reset() {
 }
 void checkMessages(void) {
   uint16_t voltage = readBatteryVoltage_mv(5);
+  char payload[64];
   digitalWrite(PMOS_CTRL_PIN, LOW);  // 打开电源
   delay(5000);
   Serial.println("AT+CEREG?"); 
@@ -77,7 +78,7 @@ void checkMessages(void) {
   Serial.flush();
   delay(1000);
 
-  Serial.println("AT+MCONFIG=\"wjy_air780e\",\"wjy\",\"1234asdf\",1,1,\"wjy_air780e/status\",\"offline\"");
+  Serial.println("AT+MCONFIG=\"wjy_air780e\",\"wjy\",\"1234asdf\",1,1,\"wjy_air780e/status\",\"connection lost\"");
   Serial.flush();
   delay(1000);
 
@@ -90,7 +91,15 @@ void checkMessages(void) {
   Serial.flush();
   delay(1000);
 
-  
+  snprintf(payload, sizeof(payload), "{\\22voltage_mv\\22:%u}", voltage);
+
+  // 发送 AT 命令
+  Serial.print("AT+MPUB=\"wjy_air780e/status\",1,1,\"");
+  Serial.print(payload);
+  Serial.print("\"\r\n");
+  Serial.flush();
+  delay(1000);
+
   Serial.println("AT+MDISCONNECT");
   Serial.flush();
   delay(1000);
@@ -101,7 +110,97 @@ void checkMessages(void) {
   delay(1000);
 
   delay(3000);
-  digitalWrite(PMOS_CTRL_PIN, HIGH);  // 打开电源
+  digitalWrite(PMOS_CTRL_PIN, HIGH);  // 关闭电源
+}
+
+
+void checkMessages_debug(void) {
+  
+  epd.Init();
+  epd.ClearFrameMemory(0xFF);  // 全白刷新屏幕
+  epd.DisplayFrame();
+  delay(100);
+  uint16_t voltage = readBatteryVoltage_mv(5);
+  char payload[64];
+  digitalWrite(PMOS_CTRL_PIN, LOW);  // 打开电源
+  delay(10000);
+  while (Serial.available() > 0) {
+  Serial.read();  // 丢弃所有未读字节
+  delay(10);
+}
+  delay(100);
+  //Serial.println("AT+IPR=9600;&W");
+  //Serial.flush();
+  //delay(100);
+
+  Serial.println("AT+CEREG?"); 
+  Serial.flush();
+
+  size_t idx = 0;
+  uint32_t t0 = millis();
+  while (millis() - t0 < 10000) {
+    while (Serial.available()) {
+      char c = (char)Serial.read();
+   if (c >= 32 && c <= 126) {  // 只保存可见字符
+  if (idx < sizeof(g_echoBuf) - 1) {
+    g_echoBuf[idx++] = c;
+  }
+}
+
+    }
+  }
+  g_echoBuf[idx] = '\0'; // 结尾
+  char buf[16];
+  snprintf(buf, sizeof(buf), "idx=%u", (unsigned)idx);
+  paint.SetWidth(14);
+  paint.SetHeight(148);
+  paint.SetRotate(ROTATE_90);
+  paint.Clear(UNCOLORED);
+  paint.DrawStringAt(0, 0, buf, &Font20, COLORED);
+  epd.SetFrameMemory_Base(paint.GetImage(), 110, 20, paint.GetWidth(), paint.GetHeight());
+  paint.Clear(UNCOLORED);
+  paint.DrawStringAt(0, 0, g_echoBuf, &Font20, COLORED);
+  epd.SetFrameMemory_Base(paint.GetImage(), 10, 20, paint.GetWidth(), paint.GetHeight());
+  epd.DisplayFrame();
+
+  delay(1000);
+  Serial.println("AT+CIPGSMLOC=1,1");
+  Serial.flush();
+  delay(1000);
+
+  Serial.println("AT+MCONFIG=\"wjy_air780e\",\"wjy\",\"1234asdf\",1,1,\"wjy_air780e/status\",\"connection lost\"");
+  Serial.flush();
+  delay(1000);
+
+  Serial.println("AT+MIPSTART=\"cow.milkcat.cc\",1883");
+  Serial.flush();
+  delay(1000);
+
+
+  Serial.println("AT+MCONNECT=0,60");
+  Serial.flush();
+  delay(1000);
+
+  snprintf(payload, sizeof(payload), "{\\22voltage_mv\\22:%u}", voltage);
+
+  // 发送 AT 命令
+  Serial.print("AT+MPUB=\"wjy_air780e/status\",1,1,\"");
+  Serial.print(payload);
+  Serial.print("\"\r\n");
+  Serial.flush();
+  delay(1000);
+
+  Serial.println("AT+MDISCONNECT");
+  Serial.flush();
+  delay(1000);
+
+
+  Serial.println("AT+MIPCLOSE");
+  Serial.flush();
+  delay(1000);
+
+  delay(3000);
+  digitalWrite(PMOS_CTRL_PIN, HIGH);  // 关闭电源
 }
 
 void switchState(EventType event) {
@@ -325,7 +424,7 @@ void setupNextAlarm() {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
   pinMode(PMOS_CTRL_PIN, OUTPUT);
   digitalWrite(PMOS_CTRL_PIN, HIGH);  // 初始状态关电源（截止）
 
@@ -366,7 +465,6 @@ void setup() {
 
   DateTime now = rtc.now();
   lastDay = now.day(); 
-  //eepromSaveTargetDate(DateTime(2025, 8, 12));
   initCountdownPanel(COUNTDOWN_EXAM);
   epd.DisplayFrame(); 
   renderClockPanel(&rtc.now(), &firstFlag, timeBuf_old);
@@ -374,8 +472,9 @@ void setup() {
   setupNextAlarm();
 
   lastDisplayTime = rtc.now();
-  eepromSaveTargetDate(DateTime(2025, 9, 1));
-  eepromLoadTotalMinutes(totalMin);
+  eepromSaveTargetDate(DateTime(2027, 06, 01));
+  //eepromLoadTotalMinutes(totalMin);
+  checkMessages_debug();
 
   
 }

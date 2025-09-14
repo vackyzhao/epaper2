@@ -1,0 +1,14 @@
+AT+CEREG?
+AT+CIPGSMLOC=1,1
+
+AT+CCLK?
+
+AT+MCONFIG="wjy_air780e","wjy","1234asdf",1,1,"wjy_air780e/status","offline"
+AT+MIPSTART="cow.milkcat.cc",1883
+AT+MCONNECT=0,60
+
+AT+MDISCONNECT
+AT+MIPCLOSE
+
+
+cmd/wjy_air780e
