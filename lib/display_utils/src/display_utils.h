@@ -16,14 +16,9 @@
 
 void initCountdownPanel(int status);
 
-void initFocusPanel(const DateTime* now, const SystemState* currentState, const SystemState* lastState,
-                  uint32_t* todayMin, uint32_t* totalMin);
 
 void renderClockPanel(const DateTime* now, bool* firstFlag, char* timeBuf_old);
 
 void renderLowBatteryScreen();
-
-void renderFocusPanel(int* status, const SystemState* currentState, const SystemState* lastState,
-               uint32_t* todayMin, uint32_t* totalMin);
 
 #endif
