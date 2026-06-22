@@ -104,6 +104,8 @@
             <div><span>Core / SREG</span><strong id="socCoreState">PC -- / SREG --</strong></div>
             <div><span>Interrupts</span><strong id="socInterruptState">pending --</strong></div>
             <div><span>SRAM</span><strong id="socSramState">2048 B</strong></div>
+            <div><span>Flash</span><strong id="socFlashState">32768 B</strong></div>
+            <div><span>EEPROM</span><strong id="socEepromState">1024 B</strong></div>
             <div><span>Stack</span><strong id="socStackState">SP --</strong></div>
             <div><span>Stack peak</span><strong id="socStackPeakState">--</strong></div>
             <div><span>Cache</span><strong id="socCacheState">none</strong></div>
@@ -400,24 +402,74 @@
 
         <div class="panel memory-map-panel">
           <div class="panel-head">
-            <h2>AVR SRAM Map</h2>
-            <span id="memoryMapState" class="state-pill">2048 B</span>
+            <h2>AVR Memory Maps</h2>
+            <span id="memoryMapState" class="state-pill">SRAM 2048 B</span>
           </div>
-          <div class="memory-map-wrap">
-            <canvas id="memoryMapCanvas" width="512" height="256" aria-label="AVR SRAM byte map"></canvas>
-          </div>
-          <div class="scope-legend memory-map-legend">
-            <span class="mem-zero">zero</span>
-            <span class="mem-data">data</span>
-            <span class="mem-stack">stack</span>
-            <span class="mem-peak">stack peak</span>
-            <span class="mem-sp">SP</span>
-          </div>
-          <div class="status-table compact-table">
-            <div><span>地址范围</span><strong id="memoryMapRange">0x0100-0x08ff</strong></div>
-            <div><span>占用统计</span><strong id="memoryMapUsage">--</strong></div>
-            <div><span>栈指针</span><strong id="memoryMapStack">--</strong></div>
-          </div>
+
+          <section class="memory-map-section">
+            <div class="map-section-head">
+              <h3>SRAM data space</h3>
+              <strong id="memoryMapHover">--</strong>
+            </div>
+            <div class="memory-map-wrap">
+              <canvas id="memoryMapCanvas" width="640" height="300" aria-label="ATmega328P SRAM byte map"></canvas>
+            </div>
+            <div class="scope-legend memory-map-legend">
+              <span class="mem-zero">0x00 zero byte</span>
+              <span class="mem-data">non-zero data</span>
+              <span class="mem-stack">current stack bytes</span>
+              <span class="mem-peak">stack peak watermark</span>
+              <span class="mem-sp">SP cursor</span>
+            </div>
+            <div class="status-table compact-table">
+              <div><span>地址范围</span><strong id="memoryMapRange">0x0100-0x08ff</strong></div>
+              <div><span>占用统计</span><strong id="memoryMapUsage">--</strong></div>
+              <div><span>栈指针</span><strong id="memoryMapStack">--</strong></div>
+            </div>
+          </section>
+
+          <section class="memory-map-section">
+            <div class="map-section-head">
+              <h3>Flash program memory</h3>
+              <span id="flashMapState" class="state-pill">32768 B</span>
+              <strong id="flashMapHover">--</strong>
+            </div>
+            <div class="memory-map-wrap">
+              <canvas id="flashMapCanvas" width="640" height="300" aria-label="ATmega328P flash byte map"></canvas>
+            </div>
+            <div class="scope-legend memory-map-legend">
+              <span class="flash-empty">0xff erased flash</span>
+              <span class="flash-used">program bytes</span>
+              <span class="flash-boot">boot/reserved 512 B</span>
+              <span class="mem-sp">PC cursor</span>
+            </div>
+            <div class="status-table compact-table">
+              <div><span>地址范围</span><strong id="flashMapRange">0x0000-0x7fff</strong></div>
+              <div><span>镜像统计</span><strong id="flashMapUsage">--</strong></div>
+              <div><span>执行位置</span><strong id="flashMapPc">--</strong></div>
+            </div>
+          </section>
+
+          <section class="memory-map-section">
+            <div class="map-section-head">
+              <h3>EEPROM nonvolatile array</h3>
+              <span id="eepromMapState" class="state-pill">1024 B</span>
+              <strong id="eepromMapHover">--</strong>
+            </div>
+            <div class="memory-map-wrap">
+              <canvas id="eepromMapCanvas" width="640" height="220" aria-label="ATmega328P EEPROM byte map"></canvas>
+            </div>
+            <div class="scope-legend memory-map-legend">
+              <span class="eeprom-erased">0xff erased EEPROM</span>
+              <span class="eeprom-written">written / programmed byte</span>
+              <span class="mem-sp">EEAR cursor</span>
+            </div>
+            <div class="status-table compact-table">
+              <div><span>地址范围</span><strong id="eepromMapRange">0x0000-0x03ff</strong></div>
+              <div><span>写入统计</span><strong id="eepromMapUsage">--</strong></div>
+              <div><span>寄存器</span><strong id="eepromMapRegs">--</strong></div>
+            </div>
+          </section>
         </div>
 
         <div class="panel log-panel">
@@ -429,7 +481,7 @@
         </div>
       </section>
     </main>
-    <script src="avr_engine.bundle.js?v=avr7"></script>
-    <script src="app.js?v=avr7"></script>
+    <script src="avr_engine.bundle.js?v=avr8"></script>
+    <script src="app.js?v=avr8"></script>
   </body>
 </html>

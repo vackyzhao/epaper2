@@ -434,6 +434,8 @@ select {
 
 .memory-map-panel {
   grid-column: 1 / -1;
+  display: grid;
+  gap: 16px;
 }
 
 .ram-grid {
@@ -470,11 +472,54 @@ select {
   overflow: hidden;
 }
 
-#memoryMapCanvas {
+.memory-map-section {
+  display: grid;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid #d5ded8;
+}
+
+.memory-map-section:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.map-section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.map-section-head h3 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.map-section-head strong {
+  margin-left: auto;
+  min-width: 0;
+  color: var(--muted);
+  font: 12px/1.2 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  overflow-wrap: anywhere;
+}
+
+#memoryMapCanvas,
+#flashMapCanvas,
+#eepromMapCanvas {
   display: block;
   width: 100%;
-  aspect-ratio: 2 / 1;
-  image-rendering: pixelated;
+  image-rendering: auto;
+}
+
+#memoryMapCanvas,
+#flashMapCanvas {
+  aspect-ratio: 640 / 300;
+}
+
+#eepromMapCanvas {
+  aspect-ratio: 640 / 220;
 }
 
 .memory-map-legend {
@@ -499,6 +544,26 @@ select {
 
 .mem-sp {
   color: #d5b93f;
+}
+
+.flash-empty {
+  color: #6d7973;
+}
+
+.flash-used {
+  color: #4b8ea1;
+}
+
+.flash-boot {
+  color: #b35b1e;
+}
+
+.eeprom-erased {
+  color: #6d7973;
+}
+
+.eeprom-written {
+  color: #6f7d1c;
 }
 
 .event-log {

@@ -52,10 +52,13 @@ class BrowserUi {
       new: document.getElementById("newCanvas").getContext("2d", { willReadFrequently: true }),
     };
     this.memoryMapCtx = document.getElementById("memoryMapCanvas").getContext("2d");
+    this.flashMapCtx = document.getElementById("flashMapCanvas").getContext("2d");
+    this.eepromMapCtx = document.getElementById("eepromMapCanvas").getContext("2d");
     this.powerScopeCtx = document.getElementById("powerScope").getContext("2d");
     this.powerSamples = [];
     this.lastPowerSampleS = -Infinity;
     this.lastSnapshot = null;
+    this.memoryMapLayouts = {};
     this.sim = new Epaper2Avr.Epaper2Avr({
       log: (line) => this.log.add(line),
       onChange: (snapshot) => this.update(snapshot),
@@ -116,6 +119,17 @@ class BrowserUi {
     }
     for (const id of ["rxMessage", "datePayload", "failAttach", "failMqtt"]) {
       document.getElementById(id).addEventListener("input", () => this.syncAirOptions());
+    }
+    for (const [canvasId, mapKey, outId] of [
+      ["memoryMapCanvas", "sram", "memoryMapHover"],
+      ["flashMapCanvas", "flash", "flashMapHover"],
+      ["eepromMapCanvas", "eeprom", "eepromMapHover"],
+    ]) {
+      const canvas = document.getElementById(canvasId);
+      canvas.addEventListener("mousemove", (event) => this.updateMemoryHover(mapKey, outId, event));
+      canvas.addEventListener("mouseleave", () => {
+        document.getElementById(outId).textContent = "--";
+      });
     }
     document.getElementById("examDateInput").addEventListener("change", () => this.updateDatePayloadFromInputs());
     document.getElementById("meetDateInput").addEventListener("change", () => this.updateDatePayloadFromInputs());
@@ -218,6 +232,8 @@ class BrowserUi {
     }
     const core = soc.core;
     const mem = soc.memory;
+    const flash = soc.flash;
+    const eeprom = soc.eeprom;
     const wdt = soc.watchdog;
     const timers = soc.timers;
     document.getElementById("socState").textContent =
@@ -228,6 +244,10 @@ class BrowserUi {
       `${core.interruptsEnabled ? "I-bit on" : "I-bit off"}, pending ${soc.interrupts.pendingCount}, next ${soc.interrupts.next}`;
     document.getElementById("socSramState").textContent =
       `${mem.sramBytes} B SRAM @ ${hex4(mem.sramStart)}-${hex4(mem.sramEnd)}, nonzero ${mem.nonZeroSramBytes} B`;
+    document.getElementById("socFlashState").textContent =
+      `${flash.totalBytes} B flash, image ${flash.usedBytes} B, app free ${flash.appFreeBytes} B`;
+    document.getElementById("socEepromState").textContent =
+      `${eeprom.totalBytes} B EEPROM, written ${eeprom.writtenBytes} B, EEAR ${hex4(eeprom.eear)}`;
     document.getElementById("socStackState").textContent = mem.stackPointerOk
       ? `SP ${mem.spHex}, used ${mem.stackUsedBytes} B, free ${mem.stackFreeBytes} B`
       : `SP ${mem.spHex} outside SRAM`;
@@ -269,62 +289,276 @@ class BrowserUi {
   }
 
   drawMemoryMap(snapshot) {
+    this.drawSramMap(snapshot);
+    this.drawFlashMap(snapshot);
+    this.drawEepromMap(snapshot);
+  }
+
+  drawSramMap(snapshot) {
     const mem = snapshot.soc?.memory;
     if (!mem?.bytes) {
       return;
     }
     const bytes = Array.from(mem.bytes);
-    const ctx = this.memoryMapCtx;
-    const canvas = ctx.canvas;
-    const cols = 64;
-    const rows = 32;
-    const cellW = canvas.width / cols;
-    const cellH = canvas.height / rows;
     const spOffset = mem.stackPointerOk ? mem.sp - mem.sramStart : -1;
     const peakOffset =
       mem.stackLowWaterSp === null || mem.stackLowWaterSp === undefined
         ? -1
         : mem.stackLowWaterSp - mem.sramStart;
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "#101513";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    for (let i = 0; i < Math.min(bytes.length, cols * rows); i += 1) {
-      const x = (i % cols) * cellW;
-      const y = Math.floor(i / cols) * cellH;
-      const value = bytes[i];
-      const isCurrentStack = spOffset >= 0 && i > spOffset;
-      const isPeakStack = peakOffset >= 0 && i > peakOffset;
-      let fill = value === 0 ? "#17211e" : memoryValueColor(value);
-      if (isPeakStack) {
-        fill = blendHex(fill, "#a34d18", 0.42);
-      }
-      if (isCurrentStack) {
-        fill = blendHex(fill, "#19706a", 0.62);
-      }
-      ctx.fillStyle = fill;
-      ctx.fillRect(x, y, Math.max(1, cellW - 0.4), Math.max(1, cellH - 0.4));
-    }
-    if (spOffset >= 0) {
-      const x = (spOffset % cols) * cellW;
-      const y = Math.floor(spOffset / cols) * cellH;
-      ctx.strokeStyle = "#f0d35a";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x + 1, y + 1, Math.max(1, cellW - 2), Math.max(1, cellH - 2));
-    }
-    ctx.strokeStyle = "#66746d";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(0.5, 0.5, canvas.width - 1, canvas.height - 1);
+    this.drawByteMap(this.memoryMapCtx, "sram", {
+      bytes,
+      startAddr: mem.sramStart,
+      totalBytes: mem.sramBytes,
+      cols: 64,
+      rows: 32,
+      title: "SRAM data space",
+      subtitle: "1 byte/cell, 64 B/row",
+      rowLabelEvery: 4,
+      majorLineEvery: 256,
+      colorFor: (value, index) => {
+        const isCurrentStack = spOffset >= 0 && index > spOffset;
+        const isPeakStack = peakOffset >= 0 && index > peakOffset;
+        let fill = value === 0 ? "#17211e" : memoryValueColor(value);
+        if (isPeakStack) {
+          fill = blendHex(fill, "#a34d18", 0.42);
+        }
+        if (isCurrentStack) {
+          fill = blendHex(fill, "#19706a", 0.62);
+        }
+        return fill;
+      },
+      markers: [
+        {
+          offset: spOffset,
+          color: "#f0d35a",
+          label: "SP",
+        },
+      ],
+    });
 
     document.getElementById("memoryMapState").textContent =
       `${mem.nonZeroSramBytes}/${mem.sramBytes} B nonzero`;
     document.getElementById("memoryMapRange").textContent =
-      `${hex4(mem.sramStart)}-${hex4(mem.sramEnd)}, ${cols}x${rows} bytes`;
+      `${hex4(mem.sramStart)}-${hex4(mem.sramEnd)}, byte accurate`;
     document.getElementById("memoryMapUsage").textContent =
       `nonzero ${mem.nonZeroSramBytes} B, zero ${mem.sramBytes - mem.nonZeroSramBytes} B`;
     document.getElementById("memoryMapStack").textContent = mem.stackPointerOk
-      ? `SP ${mem.spHex}, stack ${mem.stackUsedBytes} B, peak ${mem.stackPeakBytes} B`
+      ? `SP ${mem.spHex}, stack ${mem.stackUsedBytes} B, free ${mem.stackFreeBytes} B, peak ${mem.stackPeakBytes} B`
       : `SP ${mem.spHex} outside SRAM`;
+  }
+
+  drawFlashMap(snapshot) {
+    const flash = snapshot.soc?.flash;
+    if (!flash?.bytes) {
+      return;
+    }
+    const bytes = Array.from(flash.bytes);
+    this.drawByteMap(this.flashMapCtx, "flash", {
+      bytes,
+      startAddr: flash.start,
+      totalBytes: flash.totalBytes,
+      cols: 256,
+      rows: 128,
+      title: "Flash program memory",
+      subtitle: "1 byte/cell, 256 B/row",
+      rowLabelEvery: 16,
+      majorLineEvery: 4096,
+      colorFor: (value, index) => {
+        if (index >= flash.bootStart) {
+          return value === 0xff ? "#2d2417" : blendHex(memoryValueColor(value), "#b35b1e", 0.48);
+        }
+        return value === 0xff ? "#151a19" : flashByteColor(value, index);
+      },
+      markers: [
+        {
+          offset: flash.pcByte,
+          color: "#f0d35a",
+          label: "PC",
+        },
+      ],
+      bands: [
+        {
+          offset: flash.bootStart,
+          color: "#b35b1e",
+          label: "BOOT",
+        },
+      ],
+    });
+
+    document.getElementById("flashMapState").textContent =
+      `${flash.usedBytes}/${flash.totalBytes} B image`;
+    document.getElementById("flashMapRange").textContent =
+      `${hex4(flash.start)}-${hex4(flash.end)}, app ${hex4(flash.appStart)}-${hex4(flash.appEnd)}, boot ${hex4(flash.bootStart)}-${hex4(flash.bootEnd)}`;
+    document.getElementById("flashMapUsage").textContent =
+      `program span ${flash.usedBytes} B, non-0xff ${flash.nonFfBytes} B, app free ${flash.appFreeBytes} B`;
+    document.getElementById("flashMapPc").textContent =
+      `PC word ${snapshot.soc.core.pcHex}, byte ${flash.pcByteHex}`;
+  }
+
+  drawEepromMap(snapshot) {
+    const eeprom = snapshot.soc?.eeprom;
+    if (!eeprom?.bytes) {
+      return;
+    }
+    const bytes = Array.from(eeprom.bytes);
+    this.drawByteMap(this.eepromMapCtx, "eeprom", {
+      bytes,
+      startAddr: eeprom.start,
+      totalBytes: eeprom.totalBytes,
+      cols: 64,
+      rows: 16,
+      title: "EEPROM nonvolatile array",
+      subtitle: "1 byte/cell, 64 B/row",
+      rowLabelEvery: 2,
+      majorLineEvery: 128,
+      colorFor: (value) => (value === 0xff ? "#191d1c" : eepromByteColor(value)),
+      markers: [
+        {
+          offset: eeprom.eear,
+          color: "#f0d35a",
+          label: "EEAR",
+        },
+      ],
+    });
+
+    document.getElementById("eepromMapState").textContent =
+      `${eeprom.writtenBytes}/${eeprom.totalBytes} B written`;
+    document.getElementById("eepromMapRange").textContent =
+      `${hex4(eeprom.start)}-${hex4(eeprom.end)}, erased byte = 0xff`;
+    document.getElementById("eepromMapUsage").textContent =
+      `written ${eeprom.writtenBytes} B, erased ${eeprom.erasedBytes} B`;
+    document.getElementById("eepromMapRegs").textContent =
+      `EEAR ${hex4(eeprom.eear)}, EEDR ${hex2(eeprom.eedr)}, EECR ${hex2(eeprom.eecr)}${eeprom.writeBusy ? ", write busy" : ""}`;
+  }
+
+  drawByteMap(ctx, key, options) {
+    const {
+      bytes,
+      startAddr,
+      totalBytes,
+      cols,
+      rows,
+      title,
+      subtitle,
+      rowLabelEvery,
+      majorLineEvery,
+      colorFor,
+      markers = [],
+      bands = [],
+    } = options;
+    const { width, height } = prepareCanvasForDisplay(ctx);
+    const margin = { left: 68, top: 34, right: 10, bottom: 24 };
+    const plotW = width - margin.left - margin.right;
+    const plotH = height - margin.top - margin.bottom;
+    const cellW = plotW / cols;
+    const cellH = plotH / rows;
+    const count = Math.min(totalBytes, cols * rows, bytes.length);
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "#101513";
+    ctx.fillRect(0, 0, width, height);
+    ctx.font = "11px Consolas, ui-monospace, monospace";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = "#d9e3de";
+    ctx.fillText(title, margin.left, 15);
+    ctx.fillStyle = "#91a19a";
+    ctx.fillText(subtitle, margin.left, 29);
+    ctx.fillText(hex4(startAddr), margin.left, height - 7);
+    ctx.fillText(hex4(startAddr + totalBytes - 1), width - margin.right - 48, height - 7);
+    ctx.fillText("+00", margin.left, margin.top - 4);
+    ctx.fillText(`+${(cols - 1).toString(16).padStart(2, "0")}`, width - margin.right - 26, margin.top - 4);
+
+    ctx.strokeStyle = "#26322f";
+    ctx.lineWidth = 1;
+    for (let offset = majorLineEvery; offset < totalBytes; offset += majorLineEvery) {
+      const row = Math.floor(offset / cols);
+      const y = margin.top + row * cellH;
+      if (y >= margin.top && y <= margin.top + plotH) {
+        ctx.beginPath();
+        ctx.moveTo(margin.left, Math.round(y) + 0.5);
+        ctx.lineTo(margin.left + plotW, Math.round(y) + 0.5);
+        ctx.stroke();
+      }
+    }
+
+    for (let row = 0; row < rows; row += 1) {
+      if (row % rowLabelEvery === 0) {
+        ctx.fillStyle = "#91a19a";
+        ctx.fillText(hex4(startAddr + row * cols), 6, margin.top + row * cellH + Math.max(8, cellH));
+      }
+    }
+
+    for (let i = 0; i < count; i += 1) {
+      const x = margin.left + (i % cols) * cellW;
+      const y = margin.top + Math.floor(i / cols) * cellH;
+      ctx.fillStyle = colorFor(bytes[i], i);
+      ctx.fillRect(x, y, Math.max(1, cellW - 0.35), Math.max(1, cellH - 0.35));
+    }
+
+    for (const band of bands) {
+      if (band.offset < 0 || band.offset >= totalBytes) {
+        continue;
+      }
+      const row = Math.floor(band.offset / cols);
+      const y = margin.top + row * cellH;
+      ctx.strokeStyle = band.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(margin.left, y);
+      ctx.lineTo(margin.left + plotW, y);
+      ctx.stroke();
+      ctx.fillStyle = band.color;
+      ctx.fillText(band.label, margin.left + 4, Math.max(margin.top + 10, y - 4));
+    }
+
+    for (const marker of markers) {
+      if (marker.offset < 0 || marker.offset >= totalBytes) {
+        continue;
+      }
+      const x = margin.left + (marker.offset % cols) * cellW;
+      const y = margin.top + Math.floor(marker.offset / cols) * cellH;
+      ctx.strokeStyle = marker.color;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x + 0.5, y + 0.5, Math.max(1, cellW - 1), Math.max(1, cellH - 1));
+      ctx.fillStyle = marker.color;
+      ctx.fillText(marker.label, Math.min(width - margin.right - 26, x + 3), Math.max(10, y - 3));
+    }
+
+    ctx.strokeStyle = "#66746d";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(margin.left - 0.5, margin.top - 0.5, plotW + 1, plotH + 1);
+    this.memoryMapLayouts[key] = {
+      margin,
+      plotW,
+      plotH,
+      cols,
+      rows,
+      cellW,
+      cellH,
+      startAddr,
+      totalBytes,
+      bytes,
+    };
+  }
+
+  updateMemoryHover(key, outId, event) {
+    const layout = this.memoryMapLayouts[key];
+    if (!layout) {
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const col = Math.floor((x - layout.margin.left) / layout.cellW);
+    const row = Math.floor((y - layout.margin.top) / layout.cellH);
+    const index = row * layout.cols + col;
+    if (col < 0 || row < 0 || col >= layout.cols || row >= layout.rows || index >= layout.totalBytes) {
+      document.getElementById(outId).textContent = "--";
+      return;
+    }
+    const value = layout.bytes[index] ?? 0xff;
+    document.getElementById(outId).textContent =
+      `${hex4(layout.startAddr + index)} = ${hex2(value)} (${key.toUpperCase()} offset ${hex4(index)})`;
   }
 
   renderRefreshEffect() {
@@ -823,6 +1057,22 @@ function timerLine(timer) {
   return `0x${tcnt} CS${timer.cs} WGM${timer.wgm ?? "-"} TIMSK ${hex2(timer.timsk)}`;
 }
 
+function prepareCanvasForDisplay(ctx) {
+  const canvas = ctx.canvas;
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(1, Math.round(rect.width || canvas.width));
+  const height = Math.max(1, Math.round(rect.height || canvas.height));
+  const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+  const pixelWidth = Math.round(width * dpr);
+  const pixelHeight = Math.round(height * dpr);
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { width, height, dpr };
+}
+
 function memoryValueColor(value) {
   const v = Number(value) & 0xff;
   const bitCount = countBits(v);
@@ -839,6 +1089,21 @@ function memoryValueColor(value) {
     Math.min(255, palette[1] + Math.floor(light * 0.65)),
     Math.min(255, palette[2] + Math.floor(light * 0.55)),
   );
+}
+
+function flashByteColor(value, index) {
+  const base = memoryValueColor(value);
+  const lane = Math.floor(index / 256) % 4;
+  const tint = ["#1f5e6f", "#4d5178", "#5c6c39", "#7a5630"][lane];
+  return blendHex(base, tint, 0.28);
+}
+
+function eepromByteColor(value) {
+  if (value === 0x00) {
+    return "#28645f";
+  }
+  const base = memoryValueColor(value);
+  return blendHex(base, "#6f7d1c", 0.34);
 }
 
 function countBits(value) {

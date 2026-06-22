@@ -30,6 +30,9 @@ const AVR_DATA_SPACE_BYTES = 0x100 + SRAM_BYTES;
 const SRAM_START_ADDR = 0x100;
 const SRAM_END_ADDR = SRAM_START_ADDR + SRAM_BYTES - 1;
 const FLASH_WORDS = 0x4000;
+const FLASH_BYTES = FLASH_WORDS * 2;
+const FLASH_APP_LIMIT_BYTES = 32256;
+const EEPROM_BYTES = 1024;
 const SMCR = 0x53;
 const SPL_ADDR = 0x5d;
 const SREG_ADDR = 0x5f;
@@ -2378,7 +2381,7 @@ export class Epaper2Avr {
     this.timer1 = new AVRTimer(this.cpu, timer1Config);
     this.timer2 = new AVRTimer(this.cpu, timer2Config);
     this.adc = new AVRADC(this.cpu, adcConfig);
-    this.eepromBackend = new EEPROMMemoryBackend(1024);
+    this.eepromBackend = new EEPROMMemoryBackend(EEPROM_BYTES);
     this.eeprom = new AVREEPROM(this.cpu, this.eepromBackend, eepromConfig);
     this.usart = new AVRUSART(this.cpu, usart0Config, CPU_FREQ_HZ);
     this.twi = new AVRTWI(this.cpu, twiConfig, CPU_FREQ_HZ);
@@ -2713,6 +2716,68 @@ export class Epaper2Avr {
     };
   }
 
+  flashSummary() {
+    const bytes = this.cpu.progBytes.slice(0, FLASH_BYTES);
+    let usedBytes = 0;
+    let nonFfBytes = 0;
+    let nonZeroBytes = 0;
+    for (let i = 0; i < bytes.length; i += 1) {
+      if (bytes[i] !== 0xff) {
+        nonFfBytes += 1;
+        usedBytes = i + 1;
+      }
+      if (bytes[i] !== 0x00) {
+        nonZeroBytes += 1;
+      }
+    }
+    return {
+      totalBytes: FLASH_BYTES,
+      start: 0,
+      end: FLASH_BYTES - 1,
+      appStart: 0,
+      appEnd: FLASH_APP_LIMIT_BYTES - 1,
+      bootStart: FLASH_APP_LIMIT_BYTES,
+      bootEnd: FLASH_BYTES - 1,
+      bootBytes: FLASH_BYTES - FLASH_APP_LIMIT_BYTES,
+      bytes,
+      usedBytes,
+      appFreeBytes: Math.max(0, FLASH_APP_LIMIT_BYTES - usedBytes),
+      nonFfBytes,
+      nonZeroBytes,
+      pcByte: this.cpu.pc * 2,
+      pcByteHex: hexWord(this.cpu.pc * 2),
+    };
+  }
+
+  eepromSummary() {
+    const source = this.eepromBackend?.memory ?? new Uint8Array(EEPROM_BYTES);
+    const bytes = source.slice(0, EEPROM_BYTES);
+    let nonFfBytes = 0;
+    let nonZeroBytes = 0;
+    for (let i = 0; i < bytes.length; i += 1) {
+      if (bytes[i] !== 0xff) {
+        nonFfBytes += 1;
+      }
+      if (bytes[i] !== 0x00) {
+        nonZeroBytes += 1;
+      }
+    }
+    return {
+      totalBytes: EEPROM_BYTES,
+      start: 0,
+      end: EEPROM_BYTES - 1,
+      bytes,
+      erasedBytes: EEPROM_BYTES - nonFfBytes,
+      writtenBytes: nonFfBytes,
+      nonFfBytes,
+      nonZeroBytes,
+      eecr: this.cpu.data[eepromConfig.EECR],
+      eear: (this.cpu.data[eepromConfig.EEARH] << 8) | this.cpu.data[eepromConfig.EEARL],
+      eedr: this.cpu.data[eepromConfig.EEDR],
+      writeBusy: !!(this.cpu.data[eepromConfig.EECR] & 0x02),
+    };
+  }
+
   timerSummary(name, timer, config) {
     const readReg = (addr) => (addr ? this.cpu.data[addr] : 0);
     return {
@@ -2769,11 +2834,13 @@ export class Epaper2Avr {
         interruptsEnabled: this.cpu.interruptsEnabled,
         sleepControl: this.cpu.data[SMCR],
         sleeping: this.sleeping,
-        flashBytes: FLASH_WORDS * 2,
-        eepromBytes: this.eepromBackend?.length ?? 1024,
+        flashBytes: FLASH_BYTES,
+        eepromBytes: EEPROM_BYTES,
         cache: "none",
       },
       memory: this.sramSummary(),
+      flash: this.flashSummary(),
+      eeprom: this.eepromSummary(),
       watchdog: this.watchdogSummary(),
       timers: {
         t0: this.timerSummary("T0", this.timer0, timer0Config),
