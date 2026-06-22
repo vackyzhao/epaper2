@@ -2694,13 +2694,17 @@ export class Epaper2Avr {
       stackPointerOk && this.stackLowWaterSp >= SRAM_START_ADDR
         ? SRAM_END_ADDR - this.stackLowWaterSp
         : null;
+    const stackLowWaterSp = stackPointerOk ? this.stackLowWaterSp : null;
     return {
       dataSpaceBytes: AVR_DATA_SPACE_BYTES,
       sramBytes: SRAM_BYTES,
       sramStart: SRAM_START_ADDR,
       sramEnd: SRAM_END_ADDR,
+      bytes: this.cpu.data.slice(SRAM_START_ADDR, SRAM_END_ADDR + 1),
       sp,
       spHex: hexWord(sp),
+      stackLowWaterSp,
+      stackLowWaterSpHex: stackLowWaterSp === null ? null : hexWord(stackLowWaterSp),
       stackPointerOk,
       stackUsedBytes,
       stackFreeBytes,

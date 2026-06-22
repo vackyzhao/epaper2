@@ -398,6 +398,28 @@
           </div>
         </div>
 
+        <div class="panel memory-map-panel">
+          <div class="panel-head">
+            <h2>AVR SRAM Map</h2>
+            <span id="memoryMapState" class="state-pill">2048 B</span>
+          </div>
+          <div class="memory-map-wrap">
+            <canvas id="memoryMapCanvas" width="512" height="256" aria-label="AVR SRAM byte map"></canvas>
+          </div>
+          <div class="scope-legend memory-map-legend">
+            <span class="mem-zero">zero</span>
+            <span class="mem-data">data</span>
+            <span class="mem-stack">stack</span>
+            <span class="mem-peak">stack peak</span>
+            <span class="mem-sp">SP</span>
+          </div>
+          <div class="status-table compact-table">
+            <div><span>地址范围</span><strong id="memoryMapRange">0x0100-0x08ff</strong></div>
+            <div><span>占用统计</span><strong id="memoryMapUsage">--</strong></div>
+            <div><span>栈指针</span><strong id="memoryMapStack">--</strong></div>
+          </div>
+        </div>
+
         <div class="panel log-panel">
           <div class="panel-head">
             <h2>事件 / 总线日志</h2>
@@ -407,7 +429,7 @@
         </div>
       </section>
     </main>
-    <script src="avr_engine.bundle.js?v=avr6"></script>
-    <script src="app.js?v=avr6"></script>
+    <script src="avr_engine.bundle.js?v=avr7"></script>
+    <script src="app.js?v=avr7"></script>
   </body>
 </html>

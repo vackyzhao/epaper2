@@ -51,6 +51,7 @@ class BrowserUi {
       old: document.getElementById("oldCanvas").getContext("2d", { willReadFrequently: true }),
       new: document.getElementById("newCanvas").getContext("2d", { willReadFrequently: true }),
     };
+    this.memoryMapCtx = document.getElementById("memoryMapCanvas").getContext("2d");
     this.powerScopeCtx = document.getElementById("powerScope").getContext("2d");
     this.powerSamples = [];
     this.lastPowerSampleS = -Infinity;
@@ -207,6 +208,7 @@ class BrowserUi {
     this.updatePowerControls(snapshot);
     this.updatePanelWarning();
     this.renderFrames(snapshot);
+    this.drawMemoryMap(snapshot);
   }
 
   updateSocPanel(snapshot) {
@@ -264,6 +266,65 @@ class BrowserUi {
       window.clearInterval(this.renderLoopHandle);
       this.renderLoopActive = false;
     }
+  }
+
+  drawMemoryMap(snapshot) {
+    const mem = snapshot.soc?.memory;
+    if (!mem?.bytes) {
+      return;
+    }
+    const bytes = Array.from(mem.bytes);
+    const ctx = this.memoryMapCtx;
+    const canvas = ctx.canvas;
+    const cols = 64;
+    const rows = 32;
+    const cellW = canvas.width / cols;
+    const cellH = canvas.height / rows;
+    const spOffset = mem.stackPointerOk ? mem.sp - mem.sramStart : -1;
+    const peakOffset =
+      mem.stackLowWaterSp === null || mem.stackLowWaterSp === undefined
+        ? -1
+        : mem.stackLowWaterSp - mem.sramStart;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#101513";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    for (let i = 0; i < Math.min(bytes.length, cols * rows); i += 1) {
+      const x = (i % cols) * cellW;
+      const y = Math.floor(i / cols) * cellH;
+      const value = bytes[i];
+      const isCurrentStack = spOffset >= 0 && i > spOffset;
+      const isPeakStack = peakOffset >= 0 && i > peakOffset;
+      let fill = value === 0 ? "#17211e" : memoryValueColor(value);
+      if (isPeakStack) {
+        fill = blendHex(fill, "#a34d18", 0.42);
+      }
+      if (isCurrentStack) {
+        fill = blendHex(fill, "#19706a", 0.62);
+      }
+      ctx.fillStyle = fill;
+      ctx.fillRect(x, y, Math.max(1, cellW - 0.4), Math.max(1, cellH - 0.4));
+    }
+    if (spOffset >= 0) {
+      const x = (spOffset % cols) * cellW;
+      const y = Math.floor(spOffset / cols) * cellH;
+      ctx.strokeStyle = "#f0d35a";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x + 1, y + 1, Math.max(1, cellW - 2), Math.max(1, cellH - 2));
+    }
+    ctx.strokeStyle = "#66746d";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, 0.5, canvas.width - 1, canvas.height - 1);
+
+    document.getElementById("memoryMapState").textContent =
+      `${mem.nonZeroSramBytes}/${mem.sramBytes} B nonzero`;
+    document.getElementById("memoryMapRange").textContent =
+      `${hex4(mem.sramStart)}-${hex4(mem.sramEnd)}, ${cols}x${rows} bytes`;
+    document.getElementById("memoryMapUsage").textContent =
+      `nonzero ${mem.nonZeroSramBytes} B, zero ${mem.sramBytes - mem.nonZeroSramBytes} B`;
+    document.getElementById("memoryMapStack").textContent = mem.stackPointerOk
+      ? `SP ${mem.spHex}, stack ${mem.stackUsedBytes} B, peak ${mem.stackPeakBytes} B`
+      : `SP ${mem.spHex} outside SRAM`;
   }
 
   renderRefreshEffect() {
@@ -760,6 +821,57 @@ function hex4(value) {
 function timerLine(timer) {
   const tcnt = Number(timer.tcnt).toString(16).padStart(timer.bits === 16 ? 4 : 2, "0");
   return `0x${tcnt} CS${timer.cs} WGM${timer.wgm ?? "-"} TIMSK ${hex2(timer.timsk)}`;
+}
+
+function memoryValueColor(value) {
+  const v = Number(value) & 0xff;
+  const bitCount = countBits(v);
+  const lane = (v ^ (v >> 3) ^ (v >> 5)) & 3;
+  const light = 42 + bitCount * 4;
+  const palette = [
+    [31, 82, 107],
+    [92, 74, 124],
+    [112, 82, 39],
+    [57, 99, 73],
+  ][lane];
+  return rgbToHex(
+    Math.min(255, palette[0] + light),
+    Math.min(255, palette[1] + Math.floor(light * 0.65)),
+    Math.min(255, palette[2] + Math.floor(light * 0.55)),
+  );
+}
+
+function countBits(value) {
+  let v = value & 0xff;
+  let count = 0;
+  while (v) {
+    count += v & 1;
+    v >>= 1;
+  }
+  return count;
+}
+
+function rgbToHex(r, g, b) {
+  return `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function blendHex(a, b, t) {
+  const ca = hexToRgb(a);
+  const cb = hexToRgb(b);
+  return rgbToHex(
+    ca[0] + (cb[0] - ca[0]) * t,
+    ca[1] + (cb[1] - ca[1]) * t,
+    ca[2] + (cb[2] - ca[2]) * t,
+  );
+}
+
+function hexToRgb(hex) {
+  const raw = hex.replace("#", "");
+  return [
+    parseInt(raw.slice(0, 2), 16),
+    parseInt(raw.slice(2, 4), 16),
+    parseInt(raw.slice(4, 6), 16),
+  ];
 }
 
 function formatDuration(ms) {

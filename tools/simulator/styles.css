@@ -432,6 +432,10 @@ select {
   grid-column: 1 / -1;
 }
 
+.memory-map-panel {
+  grid-column: 1 / -1;
+}
+
 .ram-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -457,6 +461,44 @@ select {
   color: var(--muted);
   font-size: 12px;
   text-align: center;
+}
+
+.memory-map-wrap {
+  border: 1px solid #879891;
+  border-radius: 6px;
+  background: #101513;
+  overflow: hidden;
+}
+
+#memoryMapCanvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 2 / 1;
+  image-rendering: pixelated;
+}
+
+.memory-map-legend {
+  margin: 8px 0 10px;
+}
+
+.mem-zero {
+  color: #17211e;
+}
+
+.mem-data {
+  color: #5a8fa7;
+}
+
+.mem-stack {
+  color: #19706a;
+}
+
+.mem-peak {
+  color: #a34d18;
+}
+
+.mem-sp {
+  color: #d5b93f;
 }
 
 .event-log {
