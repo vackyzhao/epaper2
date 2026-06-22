@@ -243,7 +243,7 @@ class BrowserUi {
     document.getElementById("socInterruptState").textContent =
       `${core.interruptsEnabled ? "I-bit on" : "I-bit off"}, pending ${soc.interrupts.pendingCount}, next ${soc.interrupts.next}`;
     document.getElementById("socSramState").textContent =
-      `${mem.sramBytes} B SRAM @ ${hex4(mem.sramStart)}-${hex4(mem.sramEnd)}, nonzero ${mem.nonZeroSramBytes} B`;
+      `${mem.sramBytes} B SRAM @ ${hex4(mem.sramStart)}-${hex4(mem.sramEnd)}, touched ${mem.touchedSramBytes} B, nonzero ${mem.nonZeroSramBytes} B`;
     document.getElementById("socFlashState").textContent =
       `${flash.totalBytes} B flash, covered ${flash.coveredBytes} B, app free ${flash.appFreeBytes} B`;
     document.getElementById("socEepromState").textContent =
@@ -300,6 +300,7 @@ class BrowserUi {
       return;
     }
     const bytes = Array.from(mem.bytes);
+    const touched = Array.from(mem.touched ?? []);
     const spOffset = mem.stackPointerOk ? mem.sp - mem.sramStart : -1;
     const peakOffset =
       mem.stackLowWaterSp === null || mem.stackLowWaterSp === undefined
@@ -316,9 +317,10 @@ class BrowserUi {
       rowLabelEvery: 4,
       majorLineEvery: 256,
       colorFor: (value, index) => {
+        const wasTouched = touched[index] === 1;
         const isCurrentStack = spOffset >= 0 && index > spOffset;
         const isPeakStack = peakOffset >= 0 && index > peakOffset;
-        let fill = value === 0 ? "#17211e" : memoryValueColor(value);
+        let fill = value === 0 ? (wasTouched ? "#263f3a" : "#141918") : memoryValueColor(value);
         if (isPeakStack) {
           fill = blendHex(fill, "#a34d18", 0.42);
         }
@@ -334,6 +336,10 @@ class BrowserUi {
           label: "SP",
         },
       ],
+      meta: {
+        kind: "sram",
+        touched,
+      },
     });
 
     document.getElementById("memoryMapState").textContent =
@@ -341,7 +347,7 @@ class BrowserUi {
     document.getElementById("memoryMapRange").textContent =
       `${hex4(mem.sramStart)}-${hex4(mem.sramEnd)}, byte accurate`;
     document.getElementById("memoryMapUsage").textContent =
-      `nonzero ${mem.nonZeroSramBytes} B, zero ${mem.sramBytes - mem.nonZeroSramBytes} B`;
+      `nonzero ${mem.nonZeroSramBytes} B, touched ${mem.touchedSramBytes} B, touched zero ${mem.touchedZeroBytes} B, initial/unchanged ${mem.untouchedSramBytes} B`;
     document.getElementById("memoryMapStack").textContent = mem.stackPointerOk
       ? `SP ${mem.spHex}, stack ${mem.stackUsedBytes} B, free ${mem.stackFreeBytes} B, peak ${mem.stackPeakBytes} B`
       : `SP ${mem.spHex} outside SRAM`;
@@ -548,6 +554,7 @@ class BrowserUi {
       startAddr,
       totalBytes,
       bytes,
+      meta: options.meta ?? null,
     };
   }
 
@@ -567,8 +574,12 @@ class BrowserUi {
       return;
     }
     const value = layout.bytes[index] ?? 0xff;
+    const extra =
+      layout.meta?.kind === "sram"
+        ? `, ${layout.meta.touched?.[index] === 1 ? "touched" : "initial/unchanged"}`
+        : "";
     document.getElementById(outId).textContent =
-      `${hex4(layout.startAddr + index)} = ${hex2(value)} (${key.toUpperCase()} offset ${hex4(index)})`;
+      `${hex4(layout.startAddr + index)} = ${hex2(value)}${extra} (${key.toUpperCase()} offset ${hex4(index)})`;
   }
 
   renderRefreshEffect() {

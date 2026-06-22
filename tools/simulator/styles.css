@@ -530,6 +530,10 @@ select {
   color: #17211e;
 }
 
+.mem-zero-touched {
+  color: #263f3a;
+}
+
 .mem-data {
   color: #5a8fa7;
 }

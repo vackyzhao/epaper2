@@ -4895,6 +4895,16 @@ var Epaper2Avr = (() => {
       }
       this.stop();
       this.cpu = new CPU(this.program.slice(), SRAM_BYTES);
+      this.initialSramBytes = this.cpu.data.slice(SRAM_START_ADDR, SRAM_END_ADDR + 1);
+      this.lastSramBytes = this.initialSramBytes.slice();
+      this.sramTouched = new Uint8Array(SRAM_BYTES);
+      const writeData = this.cpu.writeData.bind(this.cpu);
+      this.cpu.writeData = (addr, value, mask = 255) => {
+        if (addr >= SRAM_START_ADDR && addr <= SRAM_END_ADDR) {
+          this.sramTouched[addr - SRAM_START_ADDR] = 1;
+        }
+        return writeData(addr, value, mask);
+      };
       this.bootWallMs = monotonicNow();
       this.clock = new AVRClock(this.cpu, CPU_FREQ_HZ, clockConfig);
       this.ports.b = new AVRIOPort(this.cpu, portBConfig);
@@ -5163,10 +5173,27 @@ var Epaper2Avr = (() => {
       if (stackPointerOk) {
         this.stackLowWaterSp = Math.min(this.stackLowWaterSp, sp);
       }
+      const bytes = this.cpu.data.slice(SRAM_START_ADDR, SRAM_END_ADDR + 1);
+      if (this.lastSramBytes) {
+        for (let offset = 0; offset < bytes.length; offset += 1) {
+          if (bytes[offset] !== this.lastSramBytes[offset]) {
+            this.sramTouched[offset] = 1;
+          }
+        }
+      }
+      this.lastSramBytes = bytes.slice();
       let nonZeroSramBytes = 0;
-      for (let addr = SRAM_START_ADDR; addr <= SRAM_END_ADDR; addr += 1) {
-        if (this.cpu.data[addr] !== 0) {
+      let touchedSramBytes = 0;
+      let touchedZeroBytes = 0;
+      for (let offset = 0; offset < bytes.length; offset += 1) {
+        if (bytes[offset] !== 0) {
           nonZeroSramBytes += 1;
+        }
+        if (this.sramTouched[offset]) {
+          touchedSramBytes += 1;
+          if (bytes[offset] === 0) {
+            touchedZeroBytes += 1;
+          }
         }
       }
       const stackUsedBytes = stackPointerOk ? SRAM_END_ADDR - sp : null;
@@ -5178,7 +5205,8 @@ var Epaper2Avr = (() => {
         sramBytes: SRAM_BYTES,
         sramStart: SRAM_START_ADDR,
         sramEnd: SRAM_END_ADDR,
-        bytes: this.cpu.data.slice(SRAM_START_ADDR, SRAM_END_ADDR + 1),
+        bytes,
+        touched: this.sramTouched.slice(),
         sp,
         spHex: hexWord(sp),
         stackLowWaterSp,
@@ -5187,7 +5215,10 @@ var Epaper2Avr = (() => {
         stackUsedBytes,
         stackFreeBytes,
         stackPeakBytes,
-        nonZeroSramBytes
+        nonZeroSramBytes,
+        touchedSramBytes,
+        touchedZeroBytes,
+        untouchedSramBytes: SRAM_BYTES - touchedSramBytes
       };
     }
     flashSummary() {
