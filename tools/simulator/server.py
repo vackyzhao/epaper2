@@ -32,6 +32,9 @@ class SimulatorRequestHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/firmware.hex":
             self._serve_file(self.repo_root / ".pio" / "build" / "328p8m" / "firmware.hex", "text/plain")
             return
+        if path == "/api/firmware/symbols":
+            self._serve_json(firmware_symbols(self.repo_root))
+            return
         if path == "/api/backends":
             self._serve_json(probe_backends())
             return
@@ -84,6 +87,115 @@ def _first_existing(candidates: list[str]) -> str | None:
         if candidate and Path(candidate).exists():
             return candidate
     return None
+
+
+def _avr_tool(tool: str) -> str | None:
+    exe = f"{tool}.exe"
+    return shutil.which(tool) or shutil.which(exe) or _first_existing(
+        [
+            str(Path.home() / ".platformio" / "packages" / "toolchain-atmelavr" / "bin" / exe),
+            str(Path.home() / ".platformio" / "packages" / "toolchain-atmelavr" / "bin" / tool),
+        ]
+    )
+
+
+def firmware_symbols(repo_root: Path) -> dict:
+    elf = repo_root / ".pio" / "build" / "328p8m" / "firmware.elf"
+    if not elf.exists():
+        return {"ok": False, "error": "firmware.elf not found; run PlatformIO build first", "sram": [], "flash": []}
+
+    avr_nm = _avr_tool("avr-nm")
+    if not avr_nm:
+        return {"ok": False, "error": "avr-nm not found", "elf": str(elf), "sram": [], "flash": []}
+
+    try:
+        completed = subprocess.run(
+            [avr_nm, "-S", "--size-sort", "--demangle", str(elf)],
+            cwd=repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "avr-nm timed out", "elf": str(elf), "nm": avr_nm, "sram": [], "flash": []}
+
+    if completed.returncode != 0:
+        return {
+            "ok": False,
+            "error": "avr-nm failed",
+            "returncode": completed.returncode,
+            "stderr": completed.stderr[-2000:],
+            "elf": str(elf),
+            "nm": avr_nm,
+            "sram": [],
+            "flash": [],
+        }
+
+    sram_start = 0x0100
+    sram_bytes = 2048
+    sram_vma_base = 0x800000
+    flash_bytes = 32768
+    sram = []
+    flash = []
+
+    for raw_line in completed.stdout.splitlines():
+        parts = raw_line.split(maxsplit=3)
+        if len(parts) < 4:
+            continue
+        addr_s, size_s, kind, name = parts
+        try:
+            addr = int(addr_s, 16)
+            size = int(size_s, 16)
+        except ValueError:
+            continue
+        if size <= 0:
+            continue
+
+        if kind in "bBdDnN" and sram_vma_base + sram_start <= addr < sram_vma_base + sram_start + sram_bytes:
+            offset = addr - sram_vma_base - sram_start
+            sram.append(
+                {
+                    "name": name,
+                    "kind": kind,
+                    "address": addr - sram_vma_base,
+                    "addressHex": f"0x{addr - sram_vma_base:04x}",
+                    "offset": offset,
+                    "offsetHex": f"0x{offset:04x}",
+                    "size": min(size, sram_bytes - offset),
+                    "sizeHex": f"0x{size:04x}",
+                }
+            )
+        elif kind in "tTrRwW" and 0 <= addr < flash_bytes:
+            flash.append(
+                {
+                    "name": name,
+                    "kind": kind,
+                    "address": addr,
+                    "addressHex": f"0x{addr:04x}",
+                    "offset": addr,
+                    "offsetHex": f"0x{addr:04x}",
+                    "size": min(size, flash_bytes - addr),
+                    "sizeHex": f"0x{size:04x}",
+                }
+            )
+
+    sram.sort(key=lambda item: item["offset"])
+    flash.sort(key=lambda item: item["offset"])
+    return {
+        "ok": True,
+        "elf": str(elf),
+        "nm": avr_nm,
+        "sram": sram,
+        "flash": flash,
+        "summary": {
+            "sramSymbolBytes": sum(item["size"] for item in sram),
+            "sramSymbolCount": len(sram),
+            "flashSymbolBytes": sum(item["size"] for item in flash),
+            "flashSymbolCount": len(flash),
+        },
+    }
 
 
 def probe_backends() -> dict:

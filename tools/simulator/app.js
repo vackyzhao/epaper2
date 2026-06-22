@@ -59,6 +59,7 @@ class BrowserUi {
     this.lastPowerSampleS = -Infinity;
     this.lastSnapshot = null;
     this.memoryMapLayouts = {};
+    this.firmwareSymbols = { ok: false, sram: [], flash: [] };
     this.sim = new Epaper2Avr.Epaper2Avr({
       log: (line) => this.log.add(line),
       onChange: (snapshot) => this.update(snapshot),
@@ -145,6 +146,7 @@ class BrowserUi {
       this.log.add("Loading firmware.hex from PlatformIO build output");
       document.getElementById("simulinkState").textContent = "JS plant active";
       document.getElementById("simulinkDetail").textContent = "--";
+      await this.loadFirmwareSymbols();
       const response = await fetch("/firmware.hex", { cache: "no-store" });
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -169,6 +171,34 @@ class BrowserUi {
       document.getElementById("invariantState").textContent = "firmware.hex missing";
       document.getElementById("invariantState").classList.add("bad");
     }
+  }
+
+  async loadFirmwareSymbols() {
+    try {
+      const response = await fetch("/api/firmware/symbols", { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      this.firmwareSymbols = await response.json();
+      if (this.firmwareSymbols.ok) {
+        const topSram = this.topSymbols(this.firmwareSymbols.sram, 4)
+          .map((item) => `${item.name} ${item.size} B`)
+          .join(", ");
+        this.log.add(`firmware symbols loaded: SRAM ${this.firmwareSymbols.sram.length}, Flash ${this.firmwareSymbols.flash.length}`);
+        document.getElementById("memoryMapSymbols").textContent = topSram || "no SRAM globals";
+      } else {
+        document.getElementById("memoryMapSymbols").textContent = this.firmwareSymbols.error || "symbols unavailable";
+        document.getElementById("flashMapSymbols").textContent = this.firmwareSymbols.error || "symbols unavailable";
+      }
+    } catch (error) {
+      this.firmwareSymbols = { ok: false, sram: [], flash: [], error: error.message };
+      document.getElementById("memoryMapSymbols").textContent = `symbols unavailable: ${error.message}`;
+      document.getElementById("flashMapSymbols").textContent = `symbols unavailable: ${error.message}`;
+    }
+  }
+
+  topSymbols(symbols, limit) {
+    return [...(symbols ?? [])].sort((a, b) => b.size - a.size).slice(0, limit);
   }
 
   update(snapshot) {
@@ -336,9 +366,11 @@ class BrowserUi {
           label: "SP",
         },
       ],
+      regions: this.symbolRegions(this.firmwareSymbols.sram, 12, "sram"),
       meta: {
         kind: "sram",
         touched,
+        symbols: this.firmwareSymbols.sram ?? [],
       },
     });
 
@@ -351,6 +383,8 @@ class BrowserUi {
     document.getElementById("memoryMapStack").textContent = mem.stackPointerOk
       ? `SP ${mem.spHex}, stack ${mem.stackUsedBytes} B, free ${mem.stackFreeBytes} B, peak ${mem.stackPeakBytes} B`
       : `SP ${mem.spHex} outside SRAM`;
+    document.getElementById("memoryMapSymbols").textContent =
+      this.formatSymbolSummary(this.firmwareSymbols.sram, "largest SRAM objects");
   }
 
   drawFlashMap(snapshot) {
@@ -399,6 +433,11 @@ class BrowserUi {
           label: "BOOT",
         },
       ],
+      regions: this.symbolRegions(this.topSymbols(this.firmwareSymbols.flash, 28), 96, "flash"),
+      meta: {
+        kind: "flash",
+        symbols: this.firmwareSymbols.flash ?? [],
+      },
     });
 
     document.getElementById("flashMapState").textContent =
@@ -409,6 +448,8 @@ class BrowserUi {
       `covered ${flash.coveredBytes} B, non-0xff ${flash.nonFfBytes} B, covered 0xff ${flash.coveredFfBytes} B, app free ${flash.appFreeBytes} B`;
     document.getElementById("flashMapPc").textContent =
       `PC word ${snapshot.soc.core.pcHex}, byte ${flash.pcByteHex}`;
+    document.getElementById("flashMapSymbols").textContent =
+      this.formatSymbolSummary(this.firmwareSymbols.flash, "largest flash functions");
   }
 
   drawEepromMap(snapshot) {
@@ -461,6 +502,7 @@ class BrowserUi {
       colorFor,
       markers = [],
       bands = [],
+      regions = [],
     } = options;
     const { width, height } = prepareCanvasForDisplay(ctx);
     const margin = { left: 68, top: 34, right: 10, bottom: 24 };
@@ -527,6 +569,19 @@ class BrowserUi {
       ctx.fillText(band.label, margin.left + 4, Math.max(margin.top + 10, y - 4));
     }
 
+    for (const region of regions) {
+      this.drawMemoryRegion(ctx, region, {
+        cols,
+        count,
+        cellW,
+        cellH,
+        margin,
+        plotW,
+        plotH,
+        width,
+      });
+    }
+
     for (const marker of markers) {
       if (marker.offset < 0 || marker.offset >= totalBytes) {
         continue;
@@ -558,6 +613,78 @@ class BrowserUi {
     };
   }
 
+  drawMemoryRegion(ctx, region, layout) {
+    const { cols, count, cellW, cellH, margin, plotW, plotH, width } = layout;
+    const start = Math.max(0, Number(region.offset) || 0);
+    const end = Math.min(count, start + Math.max(1, Number(region.size) || 1));
+    if (end <= start) {
+      return;
+    }
+
+    const startRow = Math.floor(start / cols);
+    const endRow = Math.floor((end - 1) / cols);
+    ctx.save();
+    ctx.strokeStyle = region.color;
+    ctx.fillStyle = region.color;
+    ctx.lineWidth = 1.5;
+    ctx.font = "10px Consolas, ui-monospace, monospace";
+    ctx.textBaseline = "alphabetic";
+
+    for (let row = startRow; row <= endRow; row += 1) {
+      const rowStart = Math.max(start, row * cols);
+      const rowEnd = Math.min(end, (row + 1) * cols);
+      const x = margin.left + (rowStart % cols) * cellW;
+      const y = margin.top + row * cellH;
+      const w = Math.max(2, (rowEnd - rowStart) * cellW);
+      if (y < margin.top || y > margin.top + plotH) {
+        continue;
+      }
+      ctx.strokeRect(x + 0.5, y + 0.5, Math.max(1, w - 1), Math.max(1, cellH - 1));
+    }
+
+    if (region.label) {
+      const x = margin.left + (start % cols) * cellW + 3;
+      const y = margin.top + startRow * cellH;
+      ctx.fillText(region.label, Math.min(width - 96, x), Math.max(margin.top + 11, y - 3));
+    }
+    ctx.restore();
+  }
+
+  symbolRegions(symbols, minSize, paletteName) {
+    const palette =
+      paletteName === "flash"
+        ? ["#5fb3c4", "#cf8e3f", "#8f9d3f", "#b28fe8", "#66a16b"]
+        : ["#62b9cc", "#d69a45", "#c7b342", "#9f8dde", "#77b174"];
+    const labelMinSize = paletteName === "flash" ? 256 : 96;
+    return (symbols ?? [])
+      .filter((symbol) => symbol.size >= minSize)
+      .map((symbol, index) => ({
+        offset: symbol.offset,
+        size: symbol.size,
+        color: palette[index % palette.length],
+        label: symbol.size >= labelMinSize ? this.shortSymbolName(symbol.name) : "",
+      }));
+  }
+
+  formatSymbolSummary(symbols, fallback) {
+    if (!this.firmwareSymbols.ok) {
+      return this.firmwareSymbols.error || "symbols unavailable";
+    }
+    const top = this.topSymbols(symbols, 5);
+    if (!top.length) {
+      return fallback;
+    }
+    return top.map((item) => `${this.shortSymbolName(item.name)} ${item.size} B @${item.addressHex}`).join(", ");
+  }
+
+  shortSymbolName(name) {
+    return String(name)
+      .replace(/\s*\[clone.*\]$/, "")
+      .replace(/\(.*\)/, "()")
+      .replace(/^.*::/, "")
+      .slice(0, 22);
+  }
+
   updateMemoryHover(key, outId, event) {
     const layout = this.memoryMapLayouts[key];
     if (!layout) {
@@ -574,12 +701,17 @@ class BrowserUi {
       return;
     }
     const value = layout.bytes[index] ?? 0xff;
+    const symbol = this.symbolAt(layout.meta?.symbols, index);
     const extra =
       layout.meta?.kind === "sram"
         ? `, ${layout.meta.touched?.[index] === 1 ? "touched" : "initial/unchanged"}`
         : "";
     document.getElementById(outId).textContent =
-      `${hex4(layout.startAddr + index)} = ${hex2(value)}${extra} (${key.toUpperCase()} offset ${hex4(index)})`;
+      `${hex4(layout.startAddr + index)} = ${hex2(value)}${extra}${symbol ? `, ${this.shortSymbolName(symbol.name)}+${hex4(index - symbol.offset)}` : ""} (${key.toUpperCase()} offset ${hex4(index)})`;
+  }
+
+  symbolAt(symbols, index) {
+    return (symbols ?? []).find((symbol) => index >= symbol.offset && index < symbol.offset + symbol.size);
   }
 
   renderRefreshEffect() {

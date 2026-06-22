@@ -550,6 +550,10 @@ select {
   color: #d5b93f;
 }
 
+.mem-symbol {
+  color: #62b9cc;
+}
+
 .flash-empty {
   color: #6d7973;
 }

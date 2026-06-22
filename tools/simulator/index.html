@@ -420,12 +420,14 @@
               <span class="mem-data">non-zero data</span>
               <span class="mem-stack">current stack bytes</span>
               <span class="mem-peak">stack peak watermark</span>
+              <span class="mem-symbol">static symbol outline</span>
               <span class="mem-sp">SP cursor</span>
             </div>
             <div class="status-table compact-table">
               <div><span>地址范围</span><strong id="memoryMapRange">0x0100-0x08ff</strong></div>
               <div><span>占用统计</span><strong id="memoryMapUsage">--</strong></div>
               <div><span>栈指针</span><strong id="memoryMapStack">--</strong></div>
+              <div><span>静态符号</span><strong id="memoryMapSymbols">--</strong></div>
             </div>
           </section>
 
@@ -442,6 +444,7 @@
               <span class="flash-empty">uncovered erased flash</span>
               <span class="flash-covered-ff">covered byte = 0xff</span>
               <span class="flash-used">program bytes</span>
+              <span class="mem-symbol">function/data outline</span>
               <span class="flash-boot">boot/reserved 512 B</span>
               <span class="mem-sp">PC cursor</span>
             </div>
@@ -449,6 +452,7 @@
               <div><span>地址范围</span><strong id="flashMapRange">0x0000-0x7fff</strong></div>
               <div><span>镜像统计</span><strong id="flashMapUsage">--</strong></div>
               <div><span>执行位置</span><strong id="flashMapPc">--</strong></div>
+              <div><span>最大符号</span><strong id="flashMapSymbols">--</strong></div>
             </div>
           </section>
 
