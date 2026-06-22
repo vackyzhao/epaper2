@@ -465,6 +465,74 @@ select {
   text-align: center;
 }
 
+.epd-diff-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 1.25fr);
+  gap: 14px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #d5ded8;
+}
+
+.epd-diff-figure {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.epd-diff-figure canvas,
+#waveCanvas {
+  width: 100%;
+  image-rendering: pixelated;
+  border: 1px solid #879891;
+  border-radius: 4px;
+  background: #101513;
+}
+
+.epd-diff-figure canvas {
+  aspect-ratio: 296 / 128;
+}
+
+.epd-diff-figure figcaption {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.epd-wave-panel {
+  display: grid;
+  gap: 8px;
+}
+
+#waveCanvas {
+  aspect-ratio: 520 / 220;
+  image-rendering: auto;
+}
+
+.epd-wave-legend {
+  margin: 0;
+}
+
+.diff-blacken {
+  color: #181c1a;
+}
+
+.diff-whiten {
+  color: #f1f4ef;
+}
+
+.diff-static {
+  color: #8b9690;
+}
+
+.diff-invalid {
+  color: #b35b1e;
+}
+
+.diff-window {
+  color: #19706a;
+}
+
 .memory-map-wrap {
   border: 1px solid #879891;
   border-radius: 6px;
@@ -608,6 +676,7 @@ select {
   .panel-grid,
   .readout-grid,
   .control-grid,
+  .epd-diff-grid,
   .ram-grid {
     grid-template-columns: 1fr;
   }

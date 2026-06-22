@@ -9,6 +9,34 @@ extern Epd epd;
 extern Paint paint;
 extern DateTime examDate;
 
+static void write2(char *out, uint8_t value)
+{
+  out[0] = (char)('0' + value / 10);
+  out[1] = (char)('0' + value % 10);
+}
+
+static void formatDate(char *out, const DateTime &dt)
+{
+  const uint16_t year = dt.year();
+  out[0] = (char)('0' + (year / 1000) % 10);
+  out[1] = (char)('0' + (year / 100) % 10);
+  out[2] = (char)('0' + (year / 10) % 10);
+  out[3] = (char)('0' + year % 10);
+  out[4] = '-';
+  write2(out + 5, dt.month());
+  out[7] = '-';
+  write2(out + 8, dt.day());
+  out[10] = '\0';
+}
+
+static void formatTime(char *out, const DateTime &dt)
+{
+  write2(out, dt.hour());
+  out[2] = ':';
+  write2(out + 3, dt.minute());
+  out[5] = '\0';
+}
+
 //渲染并且写入新旧显存，不显示
 void initCountdownPanel(int status) {
   epd.Init();
@@ -20,7 +48,7 @@ void initCountdownPanel(int status) {
 
   if (status == COUNTDOWN_MEET)
   {
-    eepromLoadTargetDate(target);    
+    eepromLoadTargetDate(EEPROM_DATE_MEET, target);
   }
 
   TimeSpan remaining = target - now00;
@@ -33,7 +61,7 @@ void initCountdownPanel(int status) {
   epd.SetFrameMemory_WhiteBase(0, 128, 128, 168);
 
   char dateBuf[11];
-  snprintf(dateBuf, sizeof(dateBuf), "%04d-%02d-%02d", now.year(), now.month(), now.day());
+  formatDate(dateBuf, now);
 
   paint.SetWidth(14);
   paint.SetHeight(148);
@@ -70,7 +98,7 @@ void initCountdownPanel(int status) {
   epd.SetFrameMemory_Base(paint.GetImage(), 10, 230, paint.GetWidth(), paint.GetHeight());
 
   char timeBuf[6];
-  snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", now.hour(), now.minute());
+  formatTime(timeBuf, now);
   paint.SetWidth(32);
   paint.SetHeight(96);
   paint.SetRotate(ROTATE_90);
@@ -78,6 +106,23 @@ void initCountdownPanel(int status) {
   paint.DrawStringAt(0, 4, timeBuf, &Font20, COLORED);
   epd.SetFrameMemory_Base(paint.GetImage(), 64, 168, paint.GetWidth(), paint.GetHeight());
 }
+
+#if EPD_FAST_PARTIAL_REFRESH
+void updateCountdownTimePartial()
+{
+  DateTime now = rtc.now();
+  char timeBuf[6];
+  formatTime(timeBuf, now);
+
+  paint.SetWidth(32);
+  paint.SetHeight(96);
+  paint.SetRotate(ROTATE_90);
+  paint.Clear(UNCOLORED);
+  paint.DrawStringAt(0, 4, timeBuf, &Font20, COLORED);
+  epd.SetFrameMemory_Partial(paint.GetImage(), 64, 168, paint.GetWidth(), paint.GetHeight());
+  epd.DisplayFrame_Partial();
+}
+#endif
 
 
 

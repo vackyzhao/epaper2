@@ -51,6 +51,8 @@ class BrowserUi {
       old: document.getElementById("oldCanvas").getContext("2d", { willReadFrequently: true }),
       new: document.getElementById("newCanvas").getContext("2d", { willReadFrequently: true }),
     };
+    this.diffCtx = document.getElementById("diffCanvas").getContext("2d", { willReadFrequently: true });
+    this.waveCtx = document.getElementById("waveCanvas").getContext("2d");
     this.memoryMapCtx = document.getElementById("memoryMapCanvas").getContext("2d");
     this.flashMapCtx = document.getElementById("flashMapCanvas").getContext("2d");
     this.eepromMapCtx = document.getElementById("eepromMapCanvas").getContext("2d");
@@ -300,6 +302,8 @@ class BrowserUi {
       snapshot.epd.visibleComplete ? 1 : 0,
       snapshot.epd.busy ? 1 : 0,
       snapshot.epd.refreshActive ? 1 : 0,
+      snapshot.epd.updateControl,
+      snapshot.epd.partialFault ? 1 : 0,
     ].join(":");
     if (signature === this.lastFrameSignature && !snapshot.epd.refreshActive) {
       return;
@@ -309,6 +313,7 @@ class BrowserUi {
     this.drawRotatedFrame(this.ramContexts.visible, this.sim.imageData("visible", { visualEffect: false }));
     this.drawRotatedFrame(this.ramContexts.old, this.sim.imageData("old"));
     this.drawRotatedFrame(this.ramContexts.new, this.sim.imageData("new"));
+    this.drawEpdDifferential(snapshot);
     if (snapshot.epd.refreshActive && !this.renderLoopActive) {
       this.renderLoopActive = true;
       this.renderLoopHandle = window.setInterval(() => this.renderRefreshEffect(), 80);
@@ -717,6 +722,7 @@ class BrowserUi {
   renderRefreshEffect() {
     const snapshot = this.sim.snapshot();
     this.drawRotatedFrame(this.ctx, this.sim.imageData("visible"));
+    this.drawEpdDifferential(snapshot);
     if (!snapshot.epd.refreshActive) {
       window.clearInterval(this.renderLoopHandle);
       this.renderLoopActive = false;
@@ -737,6 +743,159 @@ class BrowserUi {
     ctx.rotate(-Math.PI / 2);
     ctx.drawImage(scratch, 0, 0);
     ctx.restore();
+  }
+
+  drawEpdDifferential(snapshot) {
+    const oldImage = this.sim.imageData("old");
+    const newImage = this.sim.imageData("new");
+    const image = new ImageData(oldImage.width, oldImage.height);
+    const data = image.data;
+    const oldData = oldImage.data;
+    const newData = newImage.data;
+    let whiteToBlack = 0;
+    let blackToWhite = 0;
+    let invalid = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const oldInvalid = oldData[i + 1] !== oldData[i] || oldData[i + 2] !== oldData[i];
+      const newInvalid = newData[i + 1] !== newData[i] || newData[i + 2] !== newData[i];
+      const oldBlack = oldData[i] < 128;
+      const newBlack = newData[i] < 128;
+      let r = 135;
+      let g = 146;
+      let b = 140;
+      if (oldInvalid || newInvalid) {
+        r = 179;
+        g = 91;
+        b = 30;
+        invalid += 1;
+      } else if (!oldBlack && newBlack) {
+        r = 18;
+        g = 24;
+        b = 22;
+        whiteToBlack += 1;
+      } else if (oldBlack && !newBlack) {
+        r = 241;
+        g = 244;
+        b = 239;
+        blackToWhite += 1;
+      }
+      data[i] = r;
+      data[i + 1] = g;
+      data[i + 2] = b;
+      data[i + 3] = 255;
+    }
+    this.drawRotatedFrame(this.diffCtx, image);
+    this.drawDiffAreaOverlay(this.diffCtx, snapshot.epd.refreshEffect?.area ?? snapshot.epd.memoryArea);
+    this.drawEpdWaveform(snapshot);
+
+    const diff = snapshot.epd.diff ?? {};
+    const prereq = snapshot.epd.partialPrereq ?? {};
+    const area = snapshot.epd.refreshEffect?.area ?? snapshot.epd.memoryArea;
+    const command = snapshot.epd.command === null ? "--" : hex2(snapshot.epd.command);
+    document.getElementById("epdUpdateState").textContent =
+      `R22 ${hex2(snapshot.epd.updateControl)}, cmd ${command}, LUT ${snapshot.epd.lutMode}, ${snapshot.epd.awake ? "standby/RAM-access" : "deep sleep/reset; HWRESET before data"}`;
+    document.getElementById("epdPartialPrereq").textContent =
+      `${prereq.ok ? "OK" : "blocked"}: LUT ${prereq.partialLut ? "partial" : "no"}, Mode2 ${prereq.mode2Ready ? "ready" : "no"}, 0x26/base ${prereq.oldComplete ? "complete" : "invalid"}, BW ${prereq.newComplete ? "complete" : "invalid"}, base=visible ${prereq.oldMatchesVisible ? "yes" : "no"}`;
+    document.getElementById("epdWindowState").textContent =
+      `X bytes ${area.xStart}-${area.xEnd} (${area.xStart * 8}-${area.xEnd * 8 + 7}px), Y ${area.yStart}-${area.yEnd}`;
+    document.getElementById("epdDiffState").textContent =
+      `changed ${diff.changedPixels ?? whiteToBlack + blackToWhite}px, W->B ${diff.whiteToBlack ?? whiteToBlack}, B->W ${diff.blackToWhite ?? blackToWhite}, invalid bytes ${diff.invalidBytes ?? Math.ceil(invalid / 8)}`;
+  }
+
+  drawDiffAreaOverlay(ctx, area) {
+    if (!area) {
+      return;
+    }
+    const canvas = ctx.canvas;
+    const sx = canvas.width / 296;
+    const sy = canvas.height / 128;
+    const rawX = area.yStart;
+    const rawY = 127 - (area.xEnd * 8 + 7);
+    const rawW = area.yEnd - area.yStart + 1;
+    const rawH = (area.xEnd - area.xStart + 1) * 8;
+    ctx.save();
+    ctx.strokeStyle = "#19706a";
+    ctx.lineWidth = Math.max(1, Math.round(canvas.width / 296));
+    ctx.strokeRect(rawX * sx, rawY * sy, rawW * sx, rawH * sy);
+    ctx.restore();
+  }
+
+  drawEpdWaveform(snapshot) {
+    const ctx = this.waveCtx;
+    const { width, height } = prepareCanvasForDisplay(ctx);
+    const effect = snapshot.epd.refreshEffect;
+    const phase = effect ? effect.phase : 0;
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "#101513";
+    ctx.fillRect(0, 0, width, height);
+    const margin = { left: 58, top: 18, right: 16, bottom: 32 };
+    const plotW = width - margin.left - margin.right;
+    const plotH = height - margin.top - margin.bottom;
+    const lanes = [
+      { name: "VCOM", color: "#d5b93f", amp: 0.85, phase: 0 },
+      { name: "BLACK", color: "#e7ece8", amp: 0.72, phase: 0.23 },
+      { name: "WHITE", color: "#6a7470", amp: 0.58, phase: 0.52 },
+      { name: "SCAN", color: "#19706a", amp: 0.42, phase: 0.12 },
+    ];
+    ctx.strokeStyle = "#26322f";
+    ctx.lineWidth = 1;
+    ctx.font = "11px Consolas, ui-monospace, monospace";
+    ctx.textBaseline = "middle";
+    for (let i = 0; i < lanes.length; i += 1) {
+      const y = margin.top + (plotH * (i + 0.5)) / lanes.length;
+      ctx.beginPath();
+      ctx.moveTo(margin.left, y);
+      ctx.lineTo(width - margin.right, y);
+      ctx.stroke();
+      ctx.fillStyle = "#91a19a";
+      ctx.fillText(lanes[i].name, 10, y);
+      this.drawWaveLane(ctx, lanes[i], margin.left, y, plotW, plotH / lanes.length, phase, effect);
+    }
+    const cursorX = margin.left + plotW * phase;
+    ctx.strokeStyle = effect?.fault ? "#b35b1e" : "#d5b93f";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cursorX, margin.top);
+    ctx.lineTo(cursorX, height - margin.bottom);
+    ctx.stroke();
+    ctx.fillStyle = "#d9e3de";
+    const mode = effect ? `${effect.mode}${effect.partial ? " differential" : " full waveform"}` : "idle";
+    ctx.fillText(`SSD1680 ${mode}  phase ${(phase * 100).toFixed(0)}%`, margin.left, height - 14);
+    ctx.fillStyle = effect?.fault ? "#ffcf9a" : "#91a19a";
+    ctx.fillText(
+      effect?.fault
+        ? "fault: LUT/base SRAM/visible state invalid"
+        : effect?.partial
+          ? "partial: R22=0x0f uses old/new differential area"
+          : "full: R22=0xc7 drives BW RAM over full glass",
+      margin.left + 220,
+      height - 14,
+    );
+  }
+
+  drawWaveLane(ctx, lane, x, y, width, laneHeight, phase, effect) {
+    const amp = laneHeight * lane.amp * 0.32;
+    ctx.strokeStyle = lane.color;
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    for (let i = 0; i <= width; i += 1) {
+      const t = i / width;
+      const activeWindow = effect?.partial ? smoothPulse(t, 0.12, 0.84) : smoothPulse(t, 0.04, 0.96);
+      const settle = Math.max(0, 1 - t);
+      const wave =
+        Math.sin((t * (effect?.partial ? 4.5 : 8.5) + lane.phase) * Math.PI * 2) *
+        amp *
+        activeWindow *
+        (0.35 + 0.65 * settle);
+      const rowKick = lane.name === "SCAN" ? Math.sin((t - phase) * Math.PI * 18) * amp * 0.36 : 0;
+      const py = y + wave + rowKick;
+      if (i === 0) {
+        ctx.moveTo(x + i, py);
+      } else {
+        ctx.lineTo(x + i, py);
+      }
+    }
+    ctx.stroke();
   }
 
   setButtonUi(name, stateId, probeId, high, pinName) {
@@ -835,7 +994,7 @@ class BrowserUi {
       ? `${snapshot.power.supercapCurrentMa} mA, ESR ${snapshot.power.supercapEsrMohm} mΩ`
       : "model pending";
     document.getElementById("airPowerEventState").textContent = snapshot
-      ? `${snapshot.power.eventCurrentMa} mA, ${snapshot.power.activeEvents.length ? snapshot.power.activeEvents.join("+") : "idle"}`
+      ? `${snapshot.power.eventCurrentMa} mA, ${snapshot.power.activeEvents.length ? snapshot.power.activeEvents.join("+") : "idle"}, EPD ${snapshot.power.epdAwake ? `${snapshot.power.epdRetainUa}uA standby/RAM` : `${snapshot.power.epdSleepUa}uA deep sleep`}`
       : "model pending";
     document.getElementById("pulseValleyState").textContent = snapshot
       ? `${snapshot.power.predictedPulseVlteMv} mV, ${snapshot.power.plantSource} plant`
@@ -1208,6 +1367,20 @@ function hex4(value) {
 function timerLine(timer) {
   const tcnt = Number(timer.tcnt).toString(16).padStart(timer.bits === 16 ? 4 : 2, "0");
   return `0x${tcnt} CS${timer.cs} WGM${timer.wgm ?? "-"} TIMSK ${hex2(timer.timsk)}`;
+}
+
+function smoothPulse(value, start, end) {
+  const rise = smoothstep(start, start + 0.08, value);
+  const fall = 1 - smoothstep(end - 0.08, end, value);
+  return Math.max(0, Math.min(1, rise * fall));
+}
+
+function smoothstep(edge0, edge1, value) {
+  if (edge0 === edge1) {
+    return value >= edge1 ? 1 : 0;
+  }
+  const t = Math.max(0, Math.min(1, (value - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
 }
 
 function prepareCanvasForDisplay(ctx) {

@@ -82,6 +82,9 @@ const EPD_FULL_REFRESH_CYCLES = Math.round(CPU_FREQ_HZ * 2.0);
 const EPD_PARTIAL_REFRESH_CYCLES = Math.round(CPU_FREQ_HZ * 0.3);
 const EPD_PARTIAL_SETUP_CYCLES = Math.round(CPU_FREQ_HZ * 0.08);
 const EPD_REGISTER_BUSY_CYCLES = Math.round(CPU_FREQ_HZ * 0.02);
+const EPD_SPEC_UPDATE_MAS = 8;
+const EPD_SPEC_SLEEP_UA = 2;
+const SSD1680_SLEEP_RAM_ACCESS_UA = 20;
 
 const PIN = {
   EPD_RST: 0,
@@ -1065,6 +1068,9 @@ class PowerReservoirModel {
     this.avrSleepUa = AVR_SLEEP_DEFAULT_UA;
     this.boardQuiescentUa = BOARD_QUIESCENT_DEFAULT_UA;
     this.avrSleeping = false;
+    this.epdAwake = false;
+    this.epdSleepUa = EPD_SPEC_SLEEP_UA;
+    this.epdRetainUa = SSD1680_SLEEP_RAM_ACCESS_UA;
     this.unitCapacitanceF = SUPERCAP_DEFAULT_F;
     this.supercapCount = SUPERCAP_DEFAULT_COUNT;
     this.unitChargeOhms = SUPERCAP_DEFAULT_CHARGE_OHMS;
@@ -1130,6 +1136,8 @@ class PowerReservoirModel {
     switchResistanceMohm,
     burstGlitchMv,
     measurementNoiseMv,
+    epdSleepUa,
+    epdRetainUa,
   } = {}) {
     this.step();
     if (Number.isFinite(Number(batteryMv))) {
@@ -1205,6 +1213,12 @@ class PowerReservoirModel {
     if (Number.isFinite(Number(measurementNoiseMv))) {
       this.measurementNoiseMv = Math.max(0, Number(measurementNoiseMv));
     }
+    if (Number.isFinite(Number(epdSleepUa))) {
+      this.epdSleepUa = Math.max(0, Number(epdSleepUa));
+    }
+    if (Number.isFinite(Number(epdRetainUa))) {
+      this.epdRetainUa = Math.max(0, Number(epdRetainUa));
+    }
     this.capacitanceF = this.effectiveCapacitanceF();
     this.chargeOhms = this.effectiveChargeOhms();
     this.step(0);
@@ -1246,6 +1260,10 @@ class PowerReservoirModel {
 
   setAvrSleeping(sleeping) {
     this.avrSleeping = !!sleeping;
+  }
+
+  setEpdAwake(awake) {
+    this.epdAwake = !!awake;
   }
 
   clearExternalTrace() {
@@ -1395,10 +1413,6 @@ class PowerReservoirModel {
   }
 
   eventLoadMa(now = this.getTimeMs()) {
-    if (!this.airOn) {
-      this.lastActiveEvents = [];
-      return 0;
-    }
     const active = this.activeLoadEvents(now);
     this.lastActiveEvents = active;
     return active.reduce((sum, event) => sum + event.currentMa, 0);
@@ -1407,10 +1421,9 @@ class PowerReservoirModel {
   currentLoadMa() {
     const avrMa = this.avrSleeping ? this.avrSleepUa / 1000 : this.avrActiveMa;
     const boardMa = this.boardQuiescentUa / 1000;
-    if (!this.airOn) {
-      return avrMa + boardMa;
-    }
-    return avrMa + boardMa + this.airSustainMa + this.eventLoadMa();
+    const epdMa = (this.epdAwake ? this.epdRetainUa : this.epdSleepUa) / 1000;
+    const airMa = this.airOn ? this.airSustainMa : 0;
+    return avrMa + boardMa + epdMa + airMa + this.eventLoadMa();
   }
 
   pulseOverlapMs(startMs, endMs) {
@@ -1431,9 +1444,10 @@ class PowerReservoirModel {
   }
 
   averageLoadMa(startMs, endMs) {
-    if (!this.airOn || endMs <= startMs) {
+    if (endMs <= startMs) {
       const avrMa = this.avrSleeping ? this.avrSleepUa / 1000 : this.avrActiveMa;
-      return avrMa + this.boardQuiescentUa / 1000;
+      const epdMa = (this.epdAwake ? this.epdRetainUa : this.epdSleepUa) / 1000;
+      return avrMa + this.boardQuiescentUa / 1000 + epdMa + (this.airOn ? this.airSustainMa : 0);
     }
     const durationMs = Math.max(1, endMs - startMs);
     const eventMaMs = this.loadEvents.reduce((sum, event) => {
@@ -1441,7 +1455,8 @@ class PowerReservoirModel {
       return sum + overlap * event.currentMa;
     }, 0);
     const avrMa = this.avrSleeping ? this.avrSleepUa / 1000 : this.avrActiveMa;
-    return avrMa + this.boardQuiescentUa / 1000 + this.airSustainMa + eventMaMs / durationMs;
+    const epdMa = (this.epdAwake ? this.epdRetainUa : this.epdSleepUa) / 1000;
+    return avrMa + this.boardQuiescentUa / 1000 + epdMa + (this.airOn ? this.airSustainMa : 0) + eventMaMs / durationMs;
   }
 
   isTxPulseWindow(now = this.getTimeMs()) {
@@ -1658,6 +1673,9 @@ class PowerReservoirModel {
       avrActiveMa: this.avrActiveMa,
       avrSleepUa: this.avrSleepUa,
       boardQuiescentUa: this.boardQuiescentUa,
+      epdAwake: this.epdAwake,
+      epdSleepUa: this.epdSleepUa,
+      epdRetainUa: this.epdRetainUa,
       avrSleeping: this.avrSleeping,
       txPeriodMs: AIR780_TX_PERIOD_MS,
       txPulseWindow: pulseWindow,
@@ -1693,11 +1711,13 @@ class PowerReservoirModel {
 }
 
 class EpdControllerModel {
-  constructor({ log, setBusyPin, getCycles, onFrame }) {
+  constructor({ log, setBusyPin, getCycles, onFrame, setPowerState = () => {}, addPowerEvent = () => {} }) {
     this.log = log;
     this.setBusyPin = setBusyPin;
     this.getCycles = getCycles;
     this.onFrame = onFrame;
+    this.setPowerState = setPowerState;
+    this.addPowerEvent = addPowerEvent;
     this.width = 128;
     this.height = 296;
     this.bytesPerRow = this.width / 8;
@@ -1750,6 +1770,7 @@ class EpdControllerModel {
 
   reset(reason, notify = true, clearRam = true) {
     this.awake = true;
+    this.setPowerState(true);
     if (clearRam) {
       this.invalidateRam();
     }
@@ -1762,6 +1783,7 @@ class EpdControllerModel {
 
   softwareReset() {
     this.awake = true;
+    this.setPowerState(true);
     this.resetRegisters();
     this.log("EPD SWRESET; registers reset, controller RAM retained");
     this.setBusy(true, EPD_REGISTER_BUSY_CYCLES);
@@ -1800,6 +1822,7 @@ class EpdControllerModel {
 
     if (!rst && this.lastRst) {
       this.awake = false;
+      this.setPowerState(false);
       this.partialPrepared = false;
       this.analogOn = false;
       this.log("EPD RST low; controller held in reset, RAM retained while powered");
@@ -2084,6 +2107,13 @@ class EpdControllerModel {
       this.oldValid.set(this.visibleValid);
     }
     const duration = partial ? EPD_PARTIAL_REFRESH_CYCLES : EPD_FULL_REFRESH_CYCLES;
+    const durationMs = (duration / CPU_FREQ_HZ) * 1000;
+    this.addPowerEvent({
+      type: partial ? "epd-partial-update" : "epd-full-update",
+      durationMs,
+      currentMa: EPD_SPEC_UPDATE_MAS / Math.max(0.001, durationMs / 1000),
+      glitchMv: partial ? 2 : 5,
+    });
     this.refreshEffect = {
       start: this.getCycles(),
       duration,
@@ -2130,6 +2160,7 @@ class EpdControllerModel {
 
   sleep() {
     this.awake = false;
+    this.setPowerState(false);
     this.invalidateRam();
     this.partialPrepared = false;
     this.analogOn = false;
@@ -2206,6 +2237,61 @@ class EpdControllerModel {
       }
     }
     return count;
+  }
+
+  differentialStats(area = this.memoryArea) {
+    const stats = {
+      bytes: 0,
+      invalidBytes: 0,
+      changedPixels: 0,
+      whiteToBlack: 0,
+      blackToWhite: 0,
+      unchangedPixels: 0,
+      area: { ...area },
+    };
+    for (let y = area.yStart; y <= area.yEnd; y += 1) {
+      for (let xb = area.xStart; xb <= area.xEnd; xb += 1) {
+        const index = y * this.bytesPerRow + xb;
+        const oldValid = this.oldValid[index] === 1;
+        const newValid = this.newValid[index] === 1;
+        stats.bytes += 1;
+        if (!oldValid || !newValid) {
+          stats.invalidBytes += 1;
+          continue;
+        }
+        const oldByte = this.oldRam[index];
+        const newByte = this.newRam[index];
+        for (let bit = 0; bit < 8; bit += 1) {
+          const mask = 0x80 >> bit;
+          const oldBlack = (oldByte & mask) === 0;
+          const newBlack = (newByte & mask) === 0;
+          if (oldBlack === newBlack) {
+            stats.unchangedPixels += 1;
+          } else if (newBlack) {
+            stats.whiteToBlack += 1;
+            stats.changedPixels += 1;
+          } else {
+            stats.blackToWhite += 1;
+            stats.changedPixels += 1;
+          }
+        }
+      }
+    }
+    return stats;
+  }
+
+  partialPrereq(area = this.memoryArea) {
+    const oldComplete = this.areaComplete(this.oldValid, area);
+    const newComplete = this.areaComplete(this.newValid, area);
+    const oldMatchesVisible = this.areaEquals(this.oldRam, this.visibleRam, area);
+    return {
+      partialLut: this.lutMode === "partial",
+      mode2Ready: this.partialPrepared,
+      oldComplete,
+      newComplete,
+      oldMatchesVisible,
+      ok: this.lutMode === "partial" && this.partialPrepared && oldComplete && newComplete && oldMatchesVisible,
+    };
   }
 
   imageData(kind, options = {}) {
@@ -2330,6 +2416,10 @@ class EpdControllerModel {
       visibleBlackPixels: this.blackPixels(this.visibleRam),
       oldBlackPixels: this.blackPixels(this.oldRam),
       newBlackPixels: this.blackPixels(this.newRam),
+      diff: this.differentialStats(this.refreshEffect?.area ?? this.memoryArea),
+      partialPrereq: this.partialPrereq(this.refreshEffect?.area ?? this.memoryArea),
+      memoryArea: { ...this.memoryArea },
+      refreshEffect: this.refreshVisualState(true),
       spiBytes: this.spiBytes,
       command: this.currentCommand,
       updateControl: this.updateControl,
@@ -2423,6 +2513,8 @@ export class Epaper2Avr {
       getCycles: () => this.cpu.cycles,
       setBusyPin: (busyHigh) => this.ports.d.setPin(PIN.EPD_BUSY, busyHigh),
       onFrame: () => this.requestUiUpdate(),
+      setPowerState: (awake) => this.powerModel?.setEpdAwake(awake),
+      addPowerEvent: (event) => this.powerModel?.addLoadEvent(event),
     });
     this.epd.attach(this.ports.b);
 

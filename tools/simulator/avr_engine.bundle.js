@@ -2788,6 +2788,9 @@ var Epaper2Avr = (() => {
   var EPD_PARTIAL_REFRESH_CYCLES = Math.round(CPU_FREQ_HZ * 0.3);
   var EPD_PARTIAL_SETUP_CYCLES = Math.round(CPU_FREQ_HZ * 0.08);
   var EPD_REGISTER_BUSY_CYCLES = Math.round(CPU_FREQ_HZ * 0.02);
+  var EPD_SPEC_UPDATE_MAS = 8;
+  var EPD_SPEC_SLEEP_UA = 2;
+  var SSD1680_SLEEP_RAM_ACCESS_UA = 20;
   var PIN = {
     EPD_RST: 0,
     EPD_DC: 1,
@@ -3690,6 +3693,9 @@ var Epaper2Avr = (() => {
       this.avrSleepUa = AVR_SLEEP_DEFAULT_UA;
       this.boardQuiescentUa = BOARD_QUIESCENT_DEFAULT_UA;
       this.avrSleeping = false;
+      this.epdAwake = false;
+      this.epdSleepUa = EPD_SPEC_SLEEP_UA;
+      this.epdRetainUa = SSD1680_SLEEP_RAM_ACCESS_UA;
       this.unitCapacitanceF = SUPERCAP_DEFAULT_F;
       this.supercapCount = SUPERCAP_DEFAULT_COUNT;
       this.unitChargeOhms = SUPERCAP_DEFAULT_CHARGE_OHMS;
@@ -3753,7 +3759,9 @@ var Epaper2Avr = (() => {
       diodeDropMv,
       switchResistanceMohm,
       burstGlitchMv,
-      measurementNoiseMv
+      measurementNoiseMv,
+      epdSleepUa,
+      epdRetainUa
     } = {}) {
       this.step();
       if (Number.isFinite(Number(batteryMv))) {
@@ -3829,6 +3837,12 @@ var Epaper2Avr = (() => {
       if (Number.isFinite(Number(measurementNoiseMv))) {
         this.measurementNoiseMv = Math.max(0, Number(measurementNoiseMv));
       }
+      if (Number.isFinite(Number(epdSleepUa))) {
+        this.epdSleepUa = Math.max(0, Number(epdSleepUa));
+      }
+      if (Number.isFinite(Number(epdRetainUa))) {
+        this.epdRetainUa = Math.max(0, Number(epdRetainUa));
+      }
       this.capacitanceF = this.effectiveCapacitanceF();
       this.chargeOhms = this.effectiveChargeOhms();
       this.step(0);
@@ -3863,6 +3877,9 @@ var Epaper2Avr = (() => {
     }
     setAvrSleeping(sleeping) {
       this.avrSleeping = !!sleeping;
+    }
+    setEpdAwake(awake) {
+      this.epdAwake = !!awake;
     }
     clearExternalTrace() {
       this.externalTrace = null;
@@ -4002,10 +4019,6 @@ var Epaper2Avr = (() => {
       return this.loadEvents.filter((event) => event.startMs <= now && event.endMs > now);
     }
     eventLoadMa(now = this.getTimeMs()) {
-      if (!this.airOn) {
-        this.lastActiveEvents = [];
-        return 0;
-      }
       const active = this.activeLoadEvents(now);
       this.lastActiveEvents = active;
       return active.reduce((sum, event) => sum + event.currentMa, 0);
@@ -4013,10 +4026,9 @@ var Epaper2Avr = (() => {
     currentLoadMa() {
       const avrMa = this.avrSleeping ? this.avrSleepUa / 1e3 : this.avrActiveMa;
       const boardMa = this.boardQuiescentUa / 1e3;
-      if (!this.airOn) {
-        return avrMa + boardMa;
-      }
-      return avrMa + boardMa + this.airSustainMa + this.eventLoadMa();
+      const epdMa = (this.epdAwake ? this.epdRetainUa : this.epdSleepUa) / 1e3;
+      const airMa = this.airOn ? this.airSustainMa : 0;
+      return avrMa + boardMa + epdMa + airMa + this.eventLoadMa();
     }
     pulseOverlapMs(startMs, endMs) {
       if (!this.airOn || endMs <= startMs) {
@@ -4035,9 +4047,10 @@ var Epaper2Avr = (() => {
       return overlap;
     }
     averageLoadMa(startMs, endMs) {
-      if (!this.airOn || endMs <= startMs) {
+      if (endMs <= startMs) {
         const avrMa2 = this.avrSleeping ? this.avrSleepUa / 1e3 : this.avrActiveMa;
-        return avrMa2 + this.boardQuiescentUa / 1e3;
+        const epdMa2 = (this.epdAwake ? this.epdRetainUa : this.epdSleepUa) / 1e3;
+        return avrMa2 + this.boardQuiescentUa / 1e3 + epdMa2 + (this.airOn ? this.airSustainMa : 0);
       }
       const durationMs = Math.max(1, endMs - startMs);
       const eventMaMs = this.loadEvents.reduce((sum, event) => {
@@ -4045,7 +4058,8 @@ var Epaper2Avr = (() => {
         return sum + overlap * event.currentMa;
       }, 0);
       const avrMa = this.avrSleeping ? this.avrSleepUa / 1e3 : this.avrActiveMa;
-      return avrMa + this.boardQuiescentUa / 1e3 + this.airSustainMa + eventMaMs / durationMs;
+      const epdMa = (this.epdAwake ? this.epdRetainUa : this.epdSleepUa) / 1e3;
+      return avrMa + this.boardQuiescentUa / 1e3 + epdMa + (this.airOn ? this.airSustainMa : 0) + eventMaMs / durationMs;
     }
     isTxPulseWindow(now = this.getTimeMs()) {
       if (!this.airOn) {
@@ -4240,6 +4254,9 @@ var Epaper2Avr = (() => {
         avrActiveMa: this.avrActiveMa,
         avrSleepUa: this.avrSleepUa,
         boardQuiescentUa: this.boardQuiescentUa,
+        epdAwake: this.epdAwake,
+        epdSleepUa: this.epdSleepUa,
+        epdRetainUa: this.epdRetainUa,
         avrSleeping: this.avrSleeping,
         txPeriodMs: AIR780_TX_PERIOD_MS,
         txPulseWindow: pulseWindow,
@@ -4272,11 +4289,15 @@ var Epaper2Avr = (() => {
     }
   };
   var EpdControllerModel = class {
-    constructor({ log, setBusyPin, getCycles, onFrame }) {
+    constructor({ log, setBusyPin, getCycles, onFrame, setPowerState = () => {
+    }, addPowerEvent = () => {
+    } }) {
       this.log = log;
       this.setBusyPin = setBusyPin;
       this.getCycles = getCycles;
       this.onFrame = onFrame;
+      this.setPowerState = setPowerState;
+      this.addPowerEvent = addPowerEvent;
       this.width = 128;
       this.height = 296;
       this.bytesPerRow = this.width / 8;
@@ -4327,6 +4348,7 @@ var Epaper2Avr = (() => {
     }
     reset(reason, notify = true, clearRam = true) {
       this.awake = true;
+      this.setPowerState(true);
       if (clearRam) {
         this.invalidateRam();
       }
@@ -4338,6 +4360,7 @@ var Epaper2Avr = (() => {
     }
     softwareReset() {
       this.awake = true;
+      this.setPowerState(true);
       this.resetRegisters();
       this.log("EPD SWRESET; registers reset, controller RAM retained");
       this.setBusy(true, EPD_REGISTER_BUSY_CYCLES);
@@ -4372,6 +4395,7 @@ var Epaper2Avr = (() => {
       const sck = !!(value & 1 << PIN.EPD_SCK);
       if (!rst && this.lastRst) {
         this.awake = false;
+        this.setPowerState(false);
         this.partialPrepared = false;
         this.analogOn = false;
         this.log("EPD RST low; controller held in reset, RAM retained while powered");
@@ -4619,6 +4643,13 @@ var Epaper2Avr = (() => {
         this.oldValid.set(this.visibleValid);
       }
       const duration = partial ? EPD_PARTIAL_REFRESH_CYCLES : EPD_FULL_REFRESH_CYCLES;
+      const durationMs = duration / CPU_FREQ_HZ * 1e3;
+      this.addPowerEvent({
+        type: partial ? "epd-partial-update" : "epd-full-update",
+        durationMs,
+        currentMa: EPD_SPEC_UPDATE_MAS / Math.max(1e-3, durationMs / 1e3),
+        glitchMv: partial ? 2 : 5
+      });
       this.refreshEffect = {
         start: this.getCycles(),
         duration,
@@ -4661,6 +4692,7 @@ var Epaper2Avr = (() => {
     }
     sleep() {
       this.awake = false;
+      this.setPowerState(false);
       this.invalidateRam();
       this.partialPrepared = false;
       this.analogOn = false;
@@ -4730,6 +4762,59 @@ var Epaper2Avr = (() => {
         }
       }
       return count;
+    }
+    differentialStats(area = this.memoryArea) {
+      const stats = {
+        bytes: 0,
+        invalidBytes: 0,
+        changedPixels: 0,
+        whiteToBlack: 0,
+        blackToWhite: 0,
+        unchangedPixels: 0,
+        area: { ...area }
+      };
+      for (let y = area.yStart; y <= area.yEnd; y += 1) {
+        for (let xb = area.xStart; xb <= area.xEnd; xb += 1) {
+          const index = y * this.bytesPerRow + xb;
+          const oldValid = this.oldValid[index] === 1;
+          const newValid = this.newValid[index] === 1;
+          stats.bytes += 1;
+          if (!oldValid || !newValid) {
+            stats.invalidBytes += 1;
+            continue;
+          }
+          const oldByte = this.oldRam[index];
+          const newByte = this.newRam[index];
+          for (let bit = 0; bit < 8; bit += 1) {
+            const mask = 128 >> bit;
+            const oldBlack = (oldByte & mask) === 0;
+            const newBlack = (newByte & mask) === 0;
+            if (oldBlack === newBlack) {
+              stats.unchangedPixels += 1;
+            } else if (newBlack) {
+              stats.whiteToBlack += 1;
+              stats.changedPixels += 1;
+            } else {
+              stats.blackToWhite += 1;
+              stats.changedPixels += 1;
+            }
+          }
+        }
+      }
+      return stats;
+    }
+    partialPrereq(area = this.memoryArea) {
+      const oldComplete = this.areaComplete(this.oldValid, area);
+      const newComplete = this.areaComplete(this.newValid, area);
+      const oldMatchesVisible = this.areaEquals(this.oldRam, this.visibleRam, area);
+      return {
+        partialLut: this.lutMode === "partial",
+        mode2Ready: this.partialPrepared,
+        oldComplete,
+        newComplete,
+        oldMatchesVisible,
+        ok: this.lutMode === "partial" && this.partialPrepared && oldComplete && newComplete && oldMatchesVisible
+      };
     }
     imageData(kind, options = {}) {
       let ram = this.visibleRam;
@@ -4850,6 +4935,10 @@ var Epaper2Avr = (() => {
         visibleBlackPixels: this.blackPixels(this.visibleRam),
         oldBlackPixels: this.blackPixels(this.oldRam),
         newBlackPixels: this.blackPixels(this.newRam),
+        diff: this.differentialStats(this.refreshEffect?.area ?? this.memoryArea),
+        partialPrereq: this.partialPrereq(this.refreshEffect?.area ?? this.memoryArea),
+        memoryArea: { ...this.memoryArea },
+        refreshEffect: this.refreshVisualState(true),
         spiBytes: this.spiBytes,
         command: this.currentCommand,
         updateControl: this.updateControl,
@@ -4938,7 +5027,9 @@ var Epaper2Avr = (() => {
         log: this.log,
         getCycles: () => this.cpu.cycles,
         setBusyPin: (busyHigh) => this.ports.d.setPin(PIN.EPD_BUSY, busyHigh),
-        onFrame: () => this.requestUiUpdate()
+        onFrame: () => this.requestUiUpdate(),
+        setPowerState: (awake) => this.powerModel?.setEpdAwake(awake),
+        addPowerEvent: (event) => this.powerModel?.addLoadEvent(event)
       });
       this.epd.attach(this.ports.b);
       this.air780 = new Air780Model({

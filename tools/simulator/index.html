@@ -398,6 +398,28 @@
               <figcaption>New RAM</figcaption>
             </figure>
           </div>
+          <div class="epd-diff-grid">
+            <figure class="epd-diff-figure">
+              <canvas id="diffCanvas" width="296" height="128" aria-label="SSD1680 old/new differential map"></canvas>
+              <figcaption>SSD1680 BW RAM(0x24) - 0x26 base/RED RAM used as old frame</figcaption>
+            </figure>
+            <div class="epd-wave-panel">
+              <canvas id="waveCanvas" width="520" height="220" aria-label="SSD1680 differential drive waveform"></canvas>
+              <div class="scope-legend epd-wave-legend">
+                <span class="diff-blacken">white->black</span>
+                <span class="diff-whiten">black->white</span>
+                <span class="diff-static">unchanged</span>
+                <span class="diff-invalid">invalid baseline</span>
+                <span class="diff-window">active RAM window</span>
+              </div>
+              <div class="status-table compact-table">
+                <div><span>SSD1680 update</span><strong id="epdUpdateState">--</strong></div>
+                <div><span>局刷前提</span><strong id="epdPartialPrereq">--</strong></div>
+                <div><span>RAM 窗口</span><strong id="epdWindowState">--</strong></div>
+                <div><span>差分像素</span><strong id="epdDiffState">--</strong></div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="panel memory-map-panel">

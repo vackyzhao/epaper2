@@ -44,7 +44,7 @@ Epd epd;
 unsigned char image[512];
 Paint paint(image, 0, 0); // width should be the multiple of 8
 char buf[256];
-DateTime examDate(2025, 12, 20, 0, 0, 0);
+DateTime examDate(2026, 12, 25, 0, 0, 0);
 
 volatile bool alarmTriggered = false;
 volatile bool button1Pressed = false; // D2
@@ -62,12 +62,23 @@ const uint8_t TASK_MINUTE = 5;   // 固定在 xx:05
 static uint8_t lastTaskDay = 0xFF;
 static int8_t lastTaskHour = -1;
 
+#if EPD_FAST_PARTIAL_REFRESH
+static bool epdCountdownBaselineValid = false;
+static SystemState epdCountdownBaselineState = STATE_EXAM_COUNTDOWN;
+static uint8_t epdPartialRefreshCount = 0;
+#endif
+
 SystemState currentState = STATE_EXAM_COUNTDOWN;
 void switchState(EventType event);
 void setupNextAlarm();
 static void renderCurrentCountdown();
+static void invalidateCountdownBaseline();
+static bool tryFastCountdownRefresh();
 static bool parseDatePairPayload(const char *payload);
 static void setupWakePins();
+static void appendUnsigned(char *&out, uint16_t value);
+static void appendSigned(char *&out, int16_t value);
+static void formatStatusPayload(char *out, uint16_t voltage, int16_t freeRam);
 
 extern "C"
 {
@@ -81,6 +92,40 @@ static int16_t free_ram_now(void)
   volatile char top; // 放在栈上，取其地址就是当前栈顶
   char *heap_end = __brkval ? __brkval : &__heap_start;
   return (int16_t)(&top - heap_end); // 328 系列 2KB，int16 足够
+}
+
+static void appendUnsigned(char *&out, uint16_t value)
+{
+  char tmp[5];
+  uint8_t len = 0;
+  do
+  {
+    tmp[len++] = (char)('0' + (value % 10));
+    value /= 10;
+  } while (value && len < sizeof(tmp));
+
+  while (len)
+  {
+    *out++ = tmp[--len];
+  }
+}
+
+static void appendSigned(char *&out, int16_t value)
+{
+  if (value < 0)
+  {
+    *out++ = '-';
+    value = (int16_t)-value;
+  }
+  appendUnsigned(out, (uint16_t)value);
+}
+
+static void formatStatusPayload(char *out, uint16_t voltage, int16_t freeRam)
+{
+  appendUnsigned(out, voltage);
+  *out++ = ',';
+  appendSigned(out, freeRam);
+  *out = '\0';
 }
 
 static void reset()
@@ -533,7 +578,7 @@ static MqttResult checkMessages_debug(uint8_t mode)
   delay(500);
   // 拼接到 payload 后面
   memset(buf, 0, sizeof(buf));
-  snprintf(buf, sizeof(buf), "%u,%d", (unsigned int)voltage, (int)free_ram_now());
+  formatStatusPayload(buf, voltage, free_ram_now());
   Serial.print(F("AT+MPUB=\""));
   Serial.print(F(MQTT_STATUS_TOPIC));
   Serial.print(F("\",1,1,\""));
@@ -785,6 +830,7 @@ static MqttResult checkMessages_debug(uint8_t mode)
 bool mqtt_receive(void)
 {
   uint16_t mqtt_len = 0;
+  invalidateCountdownBaseline();
   alarmTriggered = false;
   button1Pressed = false;
   button2Pressed = false;
@@ -854,6 +900,7 @@ bool mqtt_receive(void)
 
 bool mqtt_send(void)
 {
+  invalidateCountdownBaseline();
   alarmTriggered = false;
   button1Pressed = false;
   button2Pressed = false;
@@ -915,6 +962,7 @@ bool mqtt_send(void)
   }
   if (display_type == MODE_SEND_HAPPY || display_type == MODE_SEND_MISS_U || display_type == MODE_SEND_TIRED)
   {
+    invalidateCountdownBaseline();
     paint.Clear(UNCOLORED);
     epd.SetFrameMemory_Base(paint.GetImage(), 80, 30, paint.GetWidth(), paint.GetHeight());
     epd.DisplayFrame();
@@ -943,12 +991,14 @@ bool mqtt_send(void)
   }
   else
   {
+    invalidateCountdownBaseline();
     epd.ClearFrameMemory(0xFF); // 全白刷新屏幕
     epd.DisplayFrame();
     delay(100);
     return false;
   }
 
+  invalidateCountdownBaseline();
   epd.ClearFrameMemory(0xFF); // 全白刷新屏幕
   epd.DisplayFrame();
   delay(1000);
@@ -959,7 +1009,40 @@ static void renderCurrentCountdown()
 {
   initCountdownPanel(currentState == STATE_MEET_COUNTDOWN ? COUNTDOWN_MEET : COUNTDOWN_EXAM);
   epd.DisplayFrame();
+#if EPD_FAST_PARTIAL_REFRESH
+  epdCountdownBaselineValid = true;
+  epdCountdownBaselineState = currentState;
+  epdPartialRefreshCount = 0;
+#else
   epd.Sleep();
+  invalidateCountdownBaseline();
+#endif
+}
+
+static void invalidateCountdownBaseline()
+{
+#if EPD_FAST_PARTIAL_REFRESH
+  epdCountdownBaselineValid = false;
+  epdPartialRefreshCount = 0;
+#endif
+}
+
+static bool tryFastCountdownRefresh()
+{
+#if EPD_FAST_PARTIAL_REFRESH
+  if (!epdCountdownBaselineValid ||
+      epdCountdownBaselineState != currentState ||
+      epdPartialRefreshCount >= EPD_PARTIALS_BEFORE_FULL)
+  {
+    return false;
+  }
+
+  updateCountdownTimePartial();
+  ++epdPartialRefreshCount;
+  return true;
+#else
+  return false;
+#endif
 }
 
 void switchState(EventType event)
@@ -1099,11 +1182,13 @@ void handleRtcAlarmEvent()
   switch (currentState)
   {
   case STATE_EXAM_COUNTDOWN:
-    renderCurrentCountdown();
+    if (!tryFastCountdownRefresh())
+      renderCurrentCountdown();
     break;
 
   case STATE_MEET_COUNTDOWN:
-    renderCurrentCountdown();
+    if (!tryFastCountdownRefresh())
+      renderCurrentCountdown();
     break;
 
   case STATE_MQTT_SEND:

@@ -55,6 +55,20 @@
 #define LOW_BATTERY_MV 3300
 #endif
 
+// 0 = power-first: put the EPD into deep sleep after a visible refresh. This
+// clears controller RAM, so the next wake must rebuild a full baseline frame.
+// 1 = speed-first: keep controller RAM valid between countdown wakeups so
+// minute updates can use differential partial refresh.
+#ifndef EPD_FAST_PARTIAL_REFRESH
+#define EPD_FAST_PARTIAL_REFRESH 0
+#endif
+
+// Partial refresh should not run forever. Force a full refresh periodically to
+// resync OLD/NEW RAM and reduce ghosting.
+#ifndef EPD_PARTIALS_BEFORE_FULL
+#define EPD_PARTIALS_BEFORE_FULL 20
+#endif
+
 // Current PCB: D4 drives a low-side N-MOS sampling switch; HIGH enables ADC divider.
 #ifndef BAT_SWITCH_ACTIVE_LEVEL
 #define BAT_SWITCH_ACTIVE_LEVEL 1
