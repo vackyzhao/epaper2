@@ -45,8 +45,8 @@ void initCountdownPanel(int status) {
   paint.SetWidth(64);
   paint.SetHeight(33);
   paint.SetRotate(ROTATE_90);
-  int pos[] = {196, 163, 130};
-  int dig[] = {units, tens, hundreds};
+  const uint8_t pos[] = {196, 163, 130};
+  const uint8_t dig[] = {(uint8_t)units, (uint8_t)tens, (uint8_t)hundreds};
 
   for (int i = 0; i < 3; i++) {
     paint.Clear(UNCOLORED);
@@ -58,49 +58,25 @@ void initCountdownPanel(int status) {
   paint.SetHeight(80);
   paint.SetRotate(ROTATE_90);
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, days_left == 1 ? "DAY" : "DAYS", &Font20, COLORED);
+  paint.DrawStringAt_P(0, 0, days_left == 1 ? PSTR("DAY") : PSTR("DAYS"), &Font20, COLORED);
   epd.SetFrameMemory_Base(paint.GetImage(), 45, 230, paint.GetWidth(), paint.GetHeight());
 
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, status == COUNTDOWN_EXAM ? "TO" : "MEET", &Font20, COLORED);
+  paint.DrawStringAt_P(0, 0, status == COUNTDOWN_EXAM ? PSTR("TO") : PSTR("MEET"), &Font20, COLORED);
   epd.SetFrameMemory_Base(paint.GetImage(), 30, 230, paint.GetWidth(), paint.GetHeight());
 
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, status == COUNTDOWN_EXAM ? "EXAM" : "ZCQ", &Font20, COLORED);
+  paint.DrawStringAt_P(0, 0, status == COUNTDOWN_EXAM ? PSTR("EXAM") : PSTR("ZCQ"), &Font20, COLORED);
   epd.SetFrameMemory_Base(paint.GetImage(), 10, 230, paint.GetWidth(), paint.GetHeight());
 
-}
-
-
-
-void renderClockPanel(const DateTime* now, bool* firstFlag, char* timeBuf_old) {
-  epd.Init();
   char timeBuf[6];
-  snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", now->hour(), now->minute());
-
+  snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", now.hour(), now.minute());
   paint.SetWidth(32);
   paint.SetHeight(96);
   paint.SetRotate(ROTATE_90);
-
-  if (*firstFlag) {
-    *firstFlag = false;
-  } else {
-    paint.Clear(UNCOLORED);
-    paint.DrawStringAt(0, 4, timeBuf_old, &Font20, COLORED);
-    epd.SetFrameMemory_Old(paint.GetImage(), 64, 168, paint.GetWidth(), paint.GetHeight());
-  }
-  delay(100);
-  paint.Clear(UNCOLORED);
-  epd.SetFrameMemory_Partial(paint.GetImage(), 64, 168, paint.GetWidth(), paint.GetHeight());
-  epd.DisplayFrame_Partial();
-
   paint.Clear(UNCOLORED);
   paint.DrawStringAt(0, 4, timeBuf, &Font20, COLORED);
-  epd.SetFrameMemory_Partial(paint.GetImage(), 64, 168, paint.GetWidth(), paint.GetHeight());
-  epd.DisplayFrame_Partial();
-
-  epd.Sleep();
-  strcpy(timeBuf_old, timeBuf);
+  epd.SetFrameMemory_Base(paint.GetImage(), 64, 168, paint.GetWidth(), paint.GetHeight());
 }
 
 

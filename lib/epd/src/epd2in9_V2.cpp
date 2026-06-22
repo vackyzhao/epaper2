@@ -27,7 +27,11 @@
 #include <stdlib.h>
 #include "epd2in9_V2.h"
 
-unsigned char _WF_PARTIAL_2IN9[159] =
+#ifndef EPD_BUSY_TIMEOUT_MS
+#define EPD_BUSY_TIMEOUT_MS 15000UL
+#endif
+
+const unsigned char _WF_PARTIAL_2IN9[159] PROGMEM =
 {
 0x0,0x40,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,
 0x80,0x80,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,
@@ -50,7 +54,7 @@ unsigned char _WF_PARTIAL_2IN9[159] =
 0x22,0x17,0x41,0xB0,0x32,0x36,
 };
 
-unsigned char WS_20_30[159] =
+const unsigned char WS_20_30[159] PROGMEM =
 {											
 0x80,	0x66,	0x0,	0x0,	0x0,	0x0,	0x0,	0x0,	0x40,	0x0,	0x0,	0x0,
 0x10,	0x66,	0x0,	0x0,	0x0,	0x0,	0x0,	0x0,	0x20,	0x0,	0x0,	0x0,
@@ -73,7 +77,7 @@ unsigned char WS_20_30[159] =
 0x22,	0x17,	0x41,	0x0,	0x32,	0x36
 };	
 
-unsigned char Gray4[159] =			
+const unsigned char Gray4[159] PROGMEM =
 {											
 0x00,	0x60,	0x00,	0x00,	0x00,	0x00,	0x00,	0x00,	0x00,	0x00,	0x00,	0x00,	//VS L0	 //2.28s			
 0x20,	0x60,	0x10,	0x00,	0x00,	0x00,	0x00,	0x00,	0x00,	0x00,	0x00,	0x00,	//VS L1				
@@ -106,6 +110,7 @@ Epd::Epd() {
     busy_pin = BUSY_PIN;
     width = EPD_WIDTH;
     height = EPD_HEIGHT;
+    partial_refresh_ready = false;
 };
 
 int Epd::Init() {
@@ -115,6 +120,7 @@ int Epd::Init() {
     }
 	
 	Reset();
+    partial_refresh_ready = false;
 	
     /* EPD hardware init start */
 	WaitUntilIdle();   
@@ -150,6 +156,7 @@ int Epd::Init_4Gray() {
     }
 	
 	Reset();
+    partial_refresh_ready = false;
 	
     /* EPD hardware init start */
 	WaitUntilIdle();   
@@ -201,9 +208,12 @@ void Epd::SendData(unsigned char data) {
  *  @brief: Wait until the busy_pin goes LOW
  */
 void Epd::WaitUntilIdle(void) {
+    unsigned long start = millis();
 	while(1) {	 //=1 BUSY
 		if(DigitalRead(busy_pin)==LOW) 
 			break;
+        if (millis() - start > EPD_BUSY_TIMEOUT_MS)
+            break;
 		DelayMs(5);
 	}
 	DelayMs(5);
@@ -411,65 +421,17 @@ void Epd::SetFrameMemory_Partial(
     int image_width,
     int image_height
 ) {
-    int x_end;
-    int y_end;
-
     if (
         image_buffer == NULL ||
-        x < 0 || image_width < 0 ||
-        y < 0 || image_height < 0
+        x < 0 || image_width <= 0 ||
+        y < 0 || image_height <= 0
     ) {
         return;
     }
-    /* x point must be the multiple of 8 or the last 3 bits will be ignored */
-    x &= 0xF8;
-    image_width &= 0xF8;
-    if (x + image_width >= this->width) {
-        x_end = this->width - 1;
-    } else {
-        x_end = x + image_width - 1;
+    if (!partial_refresh_ready) {
+        SetPartialRefresh();
     }
-    if (y + image_height >= this->height) {
-        y_end = this->height - 1;
-    } else {
-        y_end = y + image_height - 1;
-    }
-
-    DigitalWrite(reset_pin, LOW);
-    DelayMs(2);
-    DigitalWrite(reset_pin, HIGH);
-    DelayMs(2);
-	
-	SetLut(_WF_PARTIAL_2IN9);
-	SendCommand(0x37); 
-	SendData(0x00);  
-	SendData(0x00);  
-	SendData(0x00);  
-	SendData(0x00); 
-	SendData(0x00);  	
-	SendData(0x40);  
-	SendData(0x00);  
-	SendData(0x00);   
-	SendData(0x00);  
-	SendData(0x00);
-
-	SendCommand(0x3C); //BorderWavefrom
-	SendData(0x80);	
-
-	SendCommand(0x22); 
-	SendData(0xC0);   
-	SendCommand(0x20); 
-	WaitUntilIdle();  
-	
-    SetMemoryArea(x, y, x_end, y_end);
-    SetMemoryPointer(x, y);
-    SendCommand(0x24);
-    /* send the image data */
-    for (int j = 0; j < y_end - y + 1; j++) {
-        for (int i = 0; i < (x_end - x + 1) / 8; i++) {
-            SendData(image_buffer[i + j * (image_width / 8)]);
-        }
-    }
+    SetFrameMemory_Partial_NoRefresh(image_buffer, x, y, image_width, image_height);
 }
 void Epd::SetFrameMemory_Partial_NoRefresh(
     const unsigned char* image_buffer,
@@ -515,6 +477,10 @@ void Epd::SetFrameMemory_Partial_NoRefresh(
 
 void Epd::SetPartialRefresh(
 ) {
+    if (partial_refresh_ready) {
+        return;
+    }
+
     DigitalWrite(reset_pin, LOW);
     DelayMs(2);
     DigitalWrite(reset_pin, HIGH);
@@ -540,6 +506,7 @@ void Epd::SetPartialRefresh(
 	SendData(0xC0);   
 	SendCommand(0x20); 
 	WaitUntilIdle();  
+    partial_refresh_ready = true;
 }
 /**
  *  @brief: put an image buffer to the frame memory.
@@ -613,6 +580,15 @@ void Epd::ClearFrameMemory(unsigned char color) {
 
     SendCommand(0x26);
     /* send the color data */
+    for (int i = 0; i < this->width / 8 * this->height; i++) {
+        SendData(color);
+    }
+}
+
+void Epd::ClearFrameMemory_New(unsigned char color) {
+    SetMemoryArea(0, 0, this->width - 1, this->height - 1);
+    SetMemoryPointer(0, 0);
+    SendCommand(0x24);
     for (int i = 0; i < this->width / 8 * this->height; i++) {
         SendData(color);
     }
@@ -718,6 +694,7 @@ void Epd::DisplayFrame(void) {
     SendData(0xc7);
     SendCommand(0x20);
     WaitUntilIdle();
+    partial_refresh_ready = false;
 }
 
 void Epd::DisplayFrame_Partial(void) {
@@ -727,26 +704,26 @@ void Epd::DisplayFrame_Partial(void) {
     WaitUntilIdle();
 }
 
-void Epd::SetLut(unsigned char *lut) {       
+void Epd::SetLut(const unsigned char *lut) {
 	unsigned char count;
 	SendCommand(0x32);
 	for(count=0; count<153; count++) 
-		SendData(lut[count]); 
+		SendData(pgm_read_byte(&lut[count]));
 	WaitUntilIdle();
 }
 
-void Epd::SetLut_by_host(unsigned char *lut) {
-    SetLut((unsigned char *)lut);
+void Epd::SetLut_by_host(const unsigned char *lut) {
+    SetLut(lut);
 	SendCommand(0x3f);
-	SendData(*(lut+153));
+	SendData(pgm_read_byte(lut + 153));
 	SendCommand(0x03);	// gate voltage
-	SendData(*(lut+154));
+	SendData(pgm_read_byte(lut + 154));
 	SendCommand(0x04);	// source voltage
-	SendData(*(lut+155));	// VSH
-	SendData(*(lut+156));	// VSH2
-	SendData(*(lut+157));	// VSL
+	SendData(pgm_read_byte(lut + 155));	// VSH
+	SendData(pgm_read_byte(lut + 156));	// VSH2
+	SendData(pgm_read_byte(lut + 157));	// VSL
 	SendCommand(0x2c);		// VCOM
-	SendData(*(lut+158));
+	SendData(pgm_read_byte(lut + 158));
 }
 
 /**
@@ -786,8 +763,9 @@ void Epd::SetMemoryPointer(int x, int y) {
 void Epd::Sleep() {
     SendCommand(0x10);
     SendData(0x01);
+    partial_refresh_ready = false;
     digitalWrite(reset_pin, LOW);  // Reset the chip
-    digitalWrite(cs_pin, LOW);  // Reset the chip
+    digitalWrite(cs_pin, HIGH);
     digitalWrite(dc_pin, LOW);  // Reset the chip
     // WaitUntilIdle();
 }

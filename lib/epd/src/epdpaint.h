@@ -36,6 +36,7 @@
 // Color inverse. 1 or 0 = set or reset a bit if set a colored pixel
 #define IF_INVERT_COLOR     1
 
+#include <avr/pgmspace.h>
 #include "fonts.h"
 
 class Paint {
@@ -55,6 +56,7 @@ public:
     void DrawCharAt(int x, int y, char ascii_char, sFONT* font, int colored);
     void DrawCharFromZeroAt(int x, int y, char ascii_char, sFONT* font, int colored);
     void DrawStringAt(int x, int y, const char* text, sFONT* font, int colored);
+    void DrawStringAt_P(int x, int y, PGM_P text, sFONT* font, int colored);
     void DrawLine(int x0, int y0, int x1, int y1, int colored);
     void DrawHorizontalLine(int x, int y, int width, int colored);
     void DrawVerticalLine(int x, int y, int height, int colored);

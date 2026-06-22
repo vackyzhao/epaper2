@@ -4,6 +4,6 @@
 #include <Arduino.h>
 
 void batteryMonitorBegin();              // 初始化（引脚内部定义）
-uint16_t readBatteryVoltage_mv(uint8_t samples = 8);  // 返回电压值（单位V）
+uint16_t readBatteryVoltage_mv(uint8_t samples = 8);  // 返回电池电压，单位 mV
 
 #endif

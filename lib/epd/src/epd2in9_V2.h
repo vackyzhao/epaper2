@@ -35,8 +35,8 @@
 
 class Epd : EpdIf {
 public:
-    unsigned long width;
-    unsigned long height;
+    int width;
+    int height;
 
     Epd();
     ~Epd();
@@ -94,6 +94,7 @@ public:
     void SetFrameMemory_Base(const unsigned char* image_buffer);
     void SetFrameMemory_WhiteBase();
     void ClearFrameMemory(unsigned char color);
+    void ClearFrameMemory_New(unsigned char color);
     void DisplayFrame(void);
 	void DisplayFrame_Partial(void);
     void Display4Gray(const unsigned char *Image);
@@ -104,9 +105,10 @@ private:
     unsigned int dc_pin;
     unsigned int cs_pin;
     unsigned int busy_pin;
+    bool partial_refresh_ready;
 		
-	void SetLut(unsigned char *lut);
-    void SetLut_by_host(unsigned char *lut);
+	void SetLut(const unsigned char *lut);
+    void SetLut_by_host(const unsigned char *lut);
     void SetMemoryArea(int x_start, int y_start, int x_end, int y_end);
     void SetMemoryPointer(int x, int y);
 };

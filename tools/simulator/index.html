@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>epaper2 Device Simulator</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="device-stage" aria-label="Device">
+        <div class="device">
+          <div class="bezel">
+            <div class="screen-wrap">
+              <canvas id="epdCanvas" width="296" height="128" aria-label="E-paper display"></canvas>
+              <div id="busyOverlay" class="busy-overlay hidden">EPD BUSY</div>
+            </div>
+          </div>
+          <div class="button-row">
+            <button id="btn1" class="hardware-button" type="button">S1</button>
+            <button id="btn2" class="hardware-button" type="button">S2</button>
+            <button id="btn3" class="hardware-button" type="button">S3</button>
+          </div>
+          <div class="pin-strip">
+            <span id="mcuStateLed" class="led"></span>
+            <span id="mcuStateText">MCU sleep</span>
+            <span id="epdStateText">EPD RAM invalid</span>
+          </div>
+          <div class="button-probe">
+            <span id="s1Probe">S1 HIGH</span>
+            <span id="s2Probe">S2 HIGH</span>
+            <span id="s3Probe">S3 HIGH</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel-grid">
+        <div class="panel">
+          <div class="panel-head">
+            <h1>epaper2 AVR 总线仿真</h1>
+            <span id="firmwareState" class="state-pill">BOOT</span>
+          </div>
+          <div class="control-grid">
+            <button id="bootBtn" type="button">上电/复位</button>
+            <button id="alarmBtn" type="button">RTC 闹钟唤醒</button>
+            <button id="minuteBtn" type="button">前进 1 分钟</button>
+            <button id="faultPartialBtn" type="button">验证局刷约束</button>
+          </div>
+          <div class="readout-grid">
+            <label>
+              EPD 面板
+              <select id="panelSelect">
+                <option value="ws29bw" selected>Waveshare 2.9 B/W V2 128×296</option>
+                <option value="ws213bw">Waveshare 2.13 B/W 122×250</option>
+              </select>
+            </label>
+            <label>
+              RTC
+              <input id="rtcInput" type="datetime-local">
+            </label>
+            <label>
+              考试日期
+              <input id="examDateInput" type="date" value="2026-12-25">
+            </label>
+            <label>
+              见面日期
+              <input id="meetDateInput" type="date" value="2026-12-25">
+            </label>
+            <label>
+              执行速度
+              <select id="speedSelect">
+                <option value="1">实时 8MHz</option>
+                <option value="10">10x</option>
+                <option value="60">60x</option>
+                <option value="600">600x</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div class="panel peripheral-panel">
+          <div class="panel-head">
+            <h2>外设状态</h2>
+            <span id="panelWarning" class="state-pill warn">Panel model</span>
+          </div>
+          <div class="status-table">
+            <div><span>S1 / D2 / INT0</span><strong id="s1State">HIGH, idle</strong></div>
+            <div><span>S2 / D3 / INT1</span><strong id="s2State">HIGH, idle</strong></div>
+            <div><span>S3 / A1 / PCINT9</span><strong id="s3State">HIGH, idle</strong></div>
+            <div><span>DS3231 INT / D13</span><strong id="rtcIntState">HIGH, next alarm --</strong></div>
+            <div><span>EPD SPI</span><strong id="spiState">CS HIGH, DC LOW, RST HIGH</strong></div>
+            <div><span>EPD BUSY</span><strong id="busyState">LOW, idle</strong></div>
+            <div><span>EEPROM</span><strong id="eepromState">exam/meet valid</strong></div>
+            <div><span>Firmware geometry</span><strong id="firmwareGeometry">128×296 driver buffer</strong></div>
+          </div>
+        </div>
+
+        <div class="panel soc-panel">
+          <div class="panel-head">
+            <h2>ATmega328P SoC</h2>
+            <span id="socState" class="state-pill">8MHz core</span>
+          </div>
+          <div class="status-table compact-table">
+            <div><span>Core / SREG</span><strong id="socCoreState">PC -- / SREG --</strong></div>
+            <div><span>Interrupts</span><strong id="socInterruptState">pending --</strong></div>
+            <div><span>SRAM</span><strong id="socSramState">2048 B</strong></div>
+            <div><span>Stack</span><strong id="socStackState">SP --</strong></div>
+            <div><span>Stack peak</span><strong id="socStackPeakState">--</strong></div>
+            <div><span>Cache</span><strong id="socCacheState">none</strong></div>
+            <div><span>Watchdog</span><strong id="socWdtState">off</strong></div>
+            <div><span>Timers</span><strong id="socTimerState">T0/T1/T2 --</strong></div>
+          </div>
+        </div>
+
+        <div class="panel rtc-panel">
+          <div class="panel-head">
+            <h2>DS3231 RTC</h2>
+            <span id="rtcPowerState" class="state-pill">VCC</span>
+          </div>
+          <div class="slider-row">
+            <label for="rtcBackupMv">RTC VBAT 纽扣电池</label>
+            <input id="rtcBackupMv" type="range" min="0" max="3300" value="3000" step="50">
+            <output id="rtcBackupMvOut">3000 mV</output>
+          </div>
+          <label class="checkline rtc-vcc-check">
+            <input id="rtcVccDrop" type="checkbox">
+            模拟 RTC VCC 断电，仅 VBAT 保持走时
+          </label>
+          <div class="status-table compact-table">
+            <div><span>供电域</span><strong id="rtcDomainState">VCC 3300 mV / VBAT 3000 mV</strong></div>
+            <div><span>32 kHz / OSF</span><strong id="rtcOscState">running, OSF 0</strong></div>
+            <div><span>INT / SQW</span><strong id="rtcIntDetailState">HIGH, alarm mode</strong></div>
+            <div><span>控制寄存器</span><strong id="rtcCtrlState">CTRL 0x1c</strong></div>
+            <div><span>状态寄存器</span><strong id="rtcStatusState">STAT 0x00</strong></div>
+            <div><span>Alarm1</span><strong id="rtcAlarm1State">off</strong></div>
+            <div><span>Alarm1 倒计时</span><strong id="rtcAlarm1Countdown">--</strong></div>
+            <div><span>Alarm2</span><strong id="rtcAlarm2State">off</strong></div>
+            <div><span>Alarm2 倒计时</span><strong id="rtcAlarm2Countdown">--</strong></div>
+            <div><span>I2C 总线</span><strong id="rtcI2cState">0x68 ACK</strong></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>电池 / NMOS / Air780</h2>
+            <span id="powerState" class="state-pill">VBAT OK</span>
+          </div>
+          <div class="slider-row">
+            <label for="batteryMv">Li-SOCl2 开路电压</label>
+            <input id="batteryMv" type="range" min="2800" max="3700" value="3600" step="10">
+            <output id="batteryMvOut">3600 mV</output>
+          </div>
+          <div class="slider-row">
+            <label for="batteryCount">ER14505 并联数量</label>
+            <input id="batteryCount" type="range" min="1" max="4" value="2" step="1">
+            <output id="batteryCountOut">2 cells</output>
+          </div>
+          <div class="slider-row">
+            <label for="internalResistance">单节电池内阻</label>
+            <input id="internalResistance" type="range" min="50" max="1500" value="240" step="10">
+            <output id="internalResistanceOut">240 mΩ</output>
+          </div>
+          <div class="slider-row">
+            <label for="batteryTemperature">电池温度</label>
+            <input id="batteryTemperature" type="range" min="-40" max="85" value="25" step="1">
+            <output id="batteryTemperatureOut">25 C</output>
+          </div>
+          <div class="slider-row">
+            <label for="batteryContinuousLimit">ER14505 连续限流</label>
+            <input id="batteryContinuousLimit" type="range" min="10" max="400" value="100" step="5">
+            <output id="batteryContinuousLimitOut">100 mA</output>
+          </div>
+          <div class="slider-row">
+            <label for="batteryPulseLimit">ER14505 脉冲限流</label>
+            <input id="batteryPulseLimit" type="range" min="20" max="800" value="200" step="10">
+            <output id="batteryPulseLimitOut">200 mA</output>
+          </div>
+          <div class="slider-row">
+            <label for="airPulse">Air780 脉冲电流</label>
+            <input id="airPulse" type="range" min="100" max="1800" value="430" step="10">
+            <output id="airPulseOut">430 mA</output>
+          </div>
+          <div class="slider-row">
+            <label for="airSustain">Air780 待机/保持电流</label>
+            <input id="airSustain" type="range" min="0" max="150" value="5" step="1">
+            <output id="airSustainOut">5 mA</output>
+          </div>
+          <div class="slider-row">
+            <label for="airPulseWidth">LTE 峰值持续</label>
+            <input id="airPulseWidth" type="range" min="0.05" max="20" value="0.5" step="0.05">
+            <output id="airPulseWidthOut">0.50 ms</output>
+          </div>
+          <div class="slider-row">
+            <label for="supercapF">单颗超级电容</label>
+            <input id="supercapF" type="range" min="0.05" max="2" value="0.5" step="0.05">
+            <output id="supercapFOut">0.50 F</output>
+          </div>
+          <div class="slider-row">
+            <label for="supercapCount">超级电容并联数量</label>
+            <input id="supercapCount" type="range" min="1" max="4" value="2" step="1">
+            <output id="supercapCountOut">2 pcs</output>
+          </div>
+          <div class="slider-row">
+            <label for="supercapChargeR">单颗预充电阻</label>
+            <input id="supercapChargeR" type="range" min="1" max="100" value="10" step="1">
+            <output id="supercapChargeROut">10 Ω</output>
+          </div>
+          <div class="slider-row">
+            <label for="chargeResistorCount">预充电阻并联数量</label>
+            <input id="chargeResistorCount" type="range" min="1" max="4" value="2" step="1">
+            <output id="chargeResistorCountOut">2 pcs</output>
+          </div>
+          <div class="slider-row">
+            <label for="supercapEsr">超级电容 ESR</label>
+            <input id="supercapEsr" type="range" min="20" max="2500" value="800" step="10">
+            <output id="supercapEsrOut">800 mΩ</output>
+          </div>
+          <div class="slider-row">
+            <label for="supercapLeakage">超级电容漏电</label>
+            <input id="supercapLeakage" type="range" min="0" max="500" value="25" step="5">
+            <output id="supercapLeakageOut">25 uA</output>
+          </div>
+          <div class="slider-row">
+            <label for="supercapDiode">肖特基压降</label>
+            <input id="supercapDiode" type="range" min="120" max="550" value="250" step="10">
+            <output id="supercapDiodeOut">250 mV</output>
+          </div>
+          <div class="slider-row">
+            <label for="supplySwitchR">开关/走线路径电阻</label>
+            <input id="supplySwitchR" type="range" min="0" max="500" value="80" step="5">
+            <output id="supplySwitchROut">80 mΩ</output>
+          </div>
+          <div class="slider-row">
+            <label for="burstGlitch">LTE burst 毛刺幅度</label>
+            <input id="burstGlitch" type="range" min="0" max="800" value="90" step="10">
+            <output id="burstGlitchOut">90 mV</output>
+          </div>
+          <div class="slider-row">
+            <label for="measurementNoise">测量/采样噪声</label>
+            <input id="measurementNoise" type="range" min="0" max="80" value="12" step="1">
+            <output id="measurementNoiseOut">12 mV</output>
+          </div>
+          <div class="slider-row">
+            <label for="avrActiveMa">AVR active 电流</label>
+            <input id="avrActiveMa" type="range" min="0" max="25" value="5.5" step="0.1">
+            <output id="avrActiveMaOut">5.5 mA</output>
+          </div>
+          <div class="slider-row">
+            <label for="avrSleepUa">AVR sleep 电流</label>
+            <input id="avrSleepUa" type="range" min="0" max="200" value="6" step="1">
+            <output id="avrSleepUaOut">6 uA</output>
+          </div>
+          <div class="readout-grid">
+            <div class="meter">
+              <span>采样开关</span>
+              <strong id="sampleSwitchState">N-MOS off, D4 LOW</strong>
+            </div>
+            <div class="meter">
+              <span>VLTE / 负载</span>
+              <strong id="droopState">3240 mV under pulse</strong>
+            </div>
+            <div class="meter">
+              <span>3V3 总线</span>
+              <strong id="v3v3State">3300 mV</strong>
+            </div>
+            <div class="meter">
+              <span>超级电容</span>
+              <strong id="supercapState">3600 mV, idle</strong>
+            </div>
+            <div class="meter">
+              <span>电池输出</span>
+              <strong id="batteryCurrentState">0 mA</strong>
+            </div>
+            <div class="meter">
+              <span>电容输出</span>
+              <strong id="supercapCurrentState">0 mA</strong>
+            </div>
+            <div class="meter">
+              <span>Air780 事件功耗</span>
+              <strong id="airPowerEventState">idle</strong>
+            </div>
+            <div class="meter">
+              <span>预测发射谷值</span>
+              <strong id="pulseValleyState">--</strong>
+            </div>
+          </div>
+          <div class="scope-block">
+            <div class="scope-head">
+              <span>系统总线电压波形</span>
+              <strong id="scopeReadout">waiting for samples</strong>
+            </div>
+            <canvas id="powerScope" width="680" height="220" aria-label="System voltage waveform"></canvas>
+            <div class="scope-legend">
+              <span class="trace-vbat">VBAT</span>
+              <span class="trace-loaded">VBAT loaded</span>
+              <span class="trace-3v3">3V3</span>
+              <span class="trace-vlte">VLTE</span>
+              <span class="trace-vlte-ideal">VLTE ideal</span>
+              <span class="trace-cap">Supercap</span>
+            </div>
+          </div>
+          <div class="backend-block">
+            <div class="scope-head">
+              <span>后端电路仿真</span>
+              <strong id="backendState">not run</strong>
+            </div>
+            <div class="control-grid">
+              <button id="ltspiceBtn" type="button">LTspice 瞬态验证</button>
+              <button id="simulinkBtn" type="button">启用 Simulink 电源</button>
+            </div>
+            <div class="status-table compact-table">
+              <div>
+                <span>LTspice</span>
+                <strong id="ltspiceState">idle</strong>
+              </div>
+              <div>
+                <span>等效电路</span>
+                <strong id="ltspiceDetail">--</strong>
+              </div>
+              <div>
+                <span>Simulink</span>
+                <strong id="simulinkState">JS plant active</strong>
+              </div>
+              <div>
+                <span>部署链路</span>
+                <strong id="simulinkDetail">--</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>MQTT / Air780 AT 仿真</h2>
+            <span id="airState" class="state-pill">OFF</span>
+          </div>
+          <div class="readout-grid">
+            <label>
+              RX 消息
+              <input id="rxMessage" type="text" value="hello from mqtt">
+            </label>
+            <label>
+              初始化日期载荷
+              <input id="datePayload" type="text" value="261225,261225">
+            </label>
+            <label class="checkline">
+              <input id="failAttach" type="checkbox">
+              注入 CEREG 失败
+            </label>
+            <label class="checkline">
+              <input id="failMqtt" type="checkbox">
+              注入 MQTT 失败
+            </label>
+          </div>
+          <div class="status-table compact-table">
+            <div>
+              <span>注册 / 附着</span>
+              <strong id="airRegState">CEREG 0 / CGATT 0</strong>
+            </div>
+            <div>
+              <span>TCP / MQTT</span>
+              <strong id="airTcpState">TCP closed / MQTT off</strong>
+            </div>
+            <div>
+              <span>订阅主题</span>
+              <strong id="airTopicState">none</strong>
+            </div>
+            <div>
+              <span>UART / URC</span>
+              <strong id="airQueueState">rx 0 / pending 0</strong>
+            </div>
+          </div>
+          <div class="control-grid">
+            <button id="sendHappyBtn" type="button">发送 Happy</button>
+            <button id="receiveBtn" type="button">接收消息</button>
+            <button id="clearLogBtn" type="button">清空日志</button>
+          </div>
+        </div>
+
+        <div class="panel ram-panel">
+          <div class="panel-head">
+            <h2>墨水屏显存模型</h2>
+            <span id="ramState" class="state-pill">old/new invalid</span>
+          </div>
+          <div class="ram-grid">
+            <figure>
+              <canvas id="visibleCanvas" width="296" height="128"></canvas>
+              <figcaption>Visible glass</figcaption>
+            </figure>
+            <figure>
+              <canvas id="oldCanvas" width="296" height="128"></canvas>
+              <figcaption>Old RAM</figcaption>
+            </figure>
+            <figure>
+              <canvas id="newCanvas" width="296" height="128"></canvas>
+              <figcaption>New RAM</figcaption>
+            </figure>
+          </div>
+        </div>
+
+        <div class="panel log-panel">
+          <div class="panel-head">
+            <h2>事件 / 总线日志</h2>
+            <span id="invariantState" class="state-pill">EPD invariant OK</span>
+          </div>
+          <pre id="eventLog" class="event-log" aria-live="polite"></pre>
+        </div>
+      </section>
+    </main>
+    <script src="avr_engine.bundle.js?v=avr6"></script>
+    <script src="app.js?v=avr6"></script>
+  </body>
+</html>

@@ -52,9 +52,7 @@ void EpdIf::DelayMs(unsigned int delaytime) {
 }
 
 void EpdIf::SpiTransfer(unsigned char data) {
-    digitalWrite(CS_PIN, LOW);
     mySPI.transfer(data);
-    digitalWrite(CS_PIN, HIGH);
 }
 
 int EpdIf::IfInit(void) {
@@ -63,6 +61,8 @@ int EpdIf::IfInit(void) {
     pinMode(DC_PIN, OUTPUT);
     pinMode(BUSY_PIN, INPUT); 
     //pinMode(BUSY_PIN, INPUT_PULLUP);  // 启用内部上拉（约30~50kΩ）
+    digitalWrite(CS_PIN, HIGH);
+    digitalWrite(DC_PIN, LOW);
 
     mySPI.begin();
     return 0;

@@ -3,3 +3,8 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+include/secrets.h
+compile_commands.json
+node_modules/
+__pycache__/
+*.pyc

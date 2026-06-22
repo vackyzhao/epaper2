@@ -1,49 +1,78 @@
 #include "battery_monitor.h"
+#include "app_config.h"
 
-// ✅ 写死引脚
-#define BAT_ADC_PIN     A7   // 电池电压采样输入
-#define BAT_SWITCH_PIN  4    // 控制NMOS开关的IO（低电平导通）
+#define BAT_ADC_PIN A7
+#define BAT_SWITCH_PIN 4
 
-// ✅ 定点值：VREF × DIVIDER_RATIO × 1000（毫伏） = 1.1 / 1023 × 3.127 × 1000 ≈ 3.363
-// 我们用整数定点 ×1000 处理
-#define VREF_mV 1100UL               // 内部参考电压：1100mV
-#define DIVIDER_NUM 10000UL         // 分压比分子（定点整数，1/0.3197 ≈ 3.127）
-#define DIVIDER_DEN 3197UL
+// The PCB drives a low-side N-MOS that connects the lower divider leg to GND.
+// Keep this overrideable for board spins with a different sampling switch.
+#ifndef BAT_SWITCH_ACTIVE_LEVEL
+#define BAT_SWITCH_ACTIVE_LEVEL HIGH
+#endif
+
+#ifndef BAT_SETTLE_MS
+#define BAT_SETTLE_MS 50
+#endif
+
+#ifndef BAT_SAMPLE_INTERVAL_MS
+#define BAT_SAMPLE_INTERVAL_MS 5
+#endif
+
+#ifndef BAT_DIVIDER_TOP_OHMS
+#define BAT_DIVIDER_TOP_OHMS 1000000UL
+#endif
+
+#ifndef BAT_DIVIDER_BOTTOM_OHMS
+#define BAT_DIVIDER_BOTTOM_OHMS 330000UL
+#endif
+
+#define VREF_MV 1100UL
+#define DIVIDER_NUM (BAT_DIVIDER_TOP_OHMS + BAT_DIVIDER_BOTTOM_OHMS)
+#define DIVIDER_DEN BAT_DIVIDER_BOTTOM_OHMS
 #define ADC_MAX 1023UL
+
+static bool batteryMonitorReady = false;
+
+static void setBatterySwitch(bool enabled)
+{
+  const uint8_t level = enabled ? BAT_SWITCH_ACTIVE_LEVEL : !BAT_SWITCH_ACTIVE_LEVEL;
+  digitalWrite(BAT_SWITCH_PIN, level);
+  pinMode(BAT_SWITCH_PIN, OUTPUT);
+}
 
 void batteryMonitorBegin() {
   analogReference(INTERNAL);  // 使用 1.1V 内部参考
-  pinMode(BAT_SWITCH_PIN, OUTPUT);
-  digitalWrite(BAT_SWITCH_PIN, LOW);
+  setBatterySwitch(false);
   pinMode(BAT_ADC_PIN, INPUT);
   digitalWrite(BAT_ADC_PIN, LOW);
+  batteryMonitorReady = true;
 }
 
 uint16_t readBatteryVoltage_mv(uint8_t samples) {
+  if (!batteryMonitorReady) {
+    batteryMonitorBegin();
+  }
+  if (samples == 0) {
+    samples = 1;
+  }
+
   ADCSRA |= _BV(ADEN);
   analogReference(INTERNAL);
-  digitalWrite(BAT_SWITCH_PIN, HIGH);
-  delay(1000);
+  setBatterySwitch(true);
+  delay(BAT_SETTLE_MS);
   analogRead(BAT_ADC_PIN);  // 丢弃第一次
 
   uint32_t sum = 0;
   for (uint8_t i = 0; i < samples; i++) {
     sum += analogRead(BAT_ADC_PIN);
-    delay(5);
+    delay(BAT_SAMPLE_INTERVAL_MS);
   }
 
-  // 关闭电池测量通路
-  pinMode(BAT_ADC_PIN, INPUT);
-  digitalWrite(BAT_ADC_PIN, LOW);
-  pinMode(BAT_SWITCH_PIN, INPUT);
-  digitalWrite(BAT_SWITCH_PIN, LOW);
+  setBatterySwitch(false);
 
   uint16_t avg = sum / samples;
-
-  // 计算真实电压（单位毫伏）
-  // realVoltage = avg × VREF × divider_ratio / 1023
-  // 为避免浮点，乘上定点常数再整除
-  uint16_t voltage_mv = avg;
+  const uint32_t full_scale_mv = (VREF_MV * DIVIDER_NUM + DIVIDER_DEN / 2) / DIVIDER_DEN;
+  uint32_t voltage_mv = ((uint32_t)avg * full_scale_mv + ADC_MAX / 2) / ADC_MAX;
   ADCSRA &= ~_BV(ADEN);
   return (uint16_t)voltage_mv;
 }

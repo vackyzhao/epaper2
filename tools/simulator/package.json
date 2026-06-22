@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "build": "esbuild src/avr_engine.js --bundle --format=iife --global-name=Epaper2Avr --outfile=avr_engine.bundle.js"
+  },
+  "devDependencies": {
+    "avr8js": "^0.21.0",
+    "esbuild": "^0.28.1"
+  }
+}

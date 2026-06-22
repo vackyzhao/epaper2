@@ -25,6 +25,7 @@
  */
 
 #include <avr/pgmspace.h>
+#include <string.h>
 #include "epdpaint.h"
 
 Paint::Paint(unsigned char* image, int width, int height) {
@@ -42,11 +43,12 @@ Paint::~Paint() {
  *  @brief: clear the image
  */
 void Paint::Clear(int colored) {
-    for (int x = 0; x < this->width; x++) {
-        for (int y = 0; y < this->height; y++) {
-            DrawAbsolutePixel(x, y, colored);
-        }
-    }
+    const int bytes = this->width / 8 * this->height;
+#if IF_INVERT_COLOR
+    memset(this->image, colored ? 0xFF : 0x00, bytes);
+#else
+    memset(this->image, colored ? 0x00 : 0xFF, bytes);
+#endif
 }
 
 /**
@@ -118,15 +120,15 @@ void Paint::DrawPixel(int x, int y, int colored) {
           return;
         }
         point_temp = x;
-        x = this->width - y;
+        x = this->width - y - 1;
         y = point_temp;
         DrawAbsolutePixel(x, y, colored);
     } else if (this->rotate == ROTATE_180) {
         if(x < 0 || x >= this->width || y < 0 || y >= this->height) {
           return;
         }
-        x = this->width - x;
-        y = this->height - y;
+        x = this->width - x - 1;
+        y = this->height - y - 1;
         DrawAbsolutePixel(x, y, colored);
     } else if (this->rotate == ROTATE_270) {
         if(x < 0 || x >= this->height || y < 0 || y >= this->width) {
@@ -134,7 +136,7 @@ void Paint::DrawPixel(int x, int y, int colored) {
         }
         point_temp = x;
         x = y;
-        y = this->height - point_temp;
+        y = this->height - point_temp - 1;
         DrawAbsolutePixel(x, y, colored);
     }
 }
@@ -143,7 +145,7 @@ void Paint::DrawPixel(int x, int y, int colored) {
  *  @brief: this draws a charactor on the frame buffer but not refresh
  */
 void Paint::DrawCharAt(int x, int y, char ascii_char, sFONT* font, int colored) {
-    int i, j;
+    unsigned int i, j;
     unsigned int char_offset = (ascii_char - ' ') * font->Height * (font->Width / 8 + (font->Width % 8 ? 1 : 0));
     const unsigned char* ptr = &font->table[char_offset];
 
@@ -162,7 +164,7 @@ void Paint::DrawCharAt(int x, int y, char ascii_char, sFONT* font, int colored) 
     }
 }
 void Paint::DrawCharFromZeroAt(int x, int y, char ascii_char, sFONT* font, int colored) {
-    int i, j;
+    unsigned int i, j;
     unsigned int char_offset = (ascii_char - 0) * font->Height * (font->Width / 8 + (font->Width % 8 ? 1 : 0));
     const unsigned char* ptr = &font->table[char_offset];
 
@@ -200,6 +202,16 @@ void Paint::DrawStringAt(int x, int y, const char* text, sFONT* font, int colore
     }
 }
 
+void Paint::DrawStringAt_P(int x, int y, PGM_P text, sFONT* font, int colored) {
+    int refcolumn = x;
+    char c;
+
+    while ((c = (char)pgm_read_byte(text++)) != '\0') {
+        DrawCharAt(refcolumn, y, c, font, colored);
+        refcolumn += font->Width;
+    }
+}
+
 
 
 
@@ -214,7 +226,7 @@ void Paint::DrawLine(int x0, int y0, int x1, int y1, int colored) {
     int sy = y0 < y1 ? 1 : -1;
     int err = dx + dy;
 
-    while((x0 != x1) && (y0 != y1)) {
+    while((x0 != x1) || (y0 != y1)) {
         DrawPixel(x0, y0 , colored);
         if (2 * err >= dy) {     
             err += dy;

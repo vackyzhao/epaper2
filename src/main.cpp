@@ -8,53 +8,50 @@
 #include <avr/sleep.h>
 #include <avr/power.h>
 #include <avr/interrupt.h>
+#include <avr/pgmspace.h>
 
 #include <battery_monitor.h>
 #include <eeprom_utils.h>
 #include <display_utils.h>
+#include <app_config.h>
 
 #include <RTClib.h>
 #include <globals.h>
 #include <avr/wdt.h>
-#include <avr/eeprom.h>
-#include <avr/io.h> // 提供 E2END 宏
-
-// 选择“尾部 256B”的起始地址
-#define EE_TAIL_BASE ((uint16_t)(E2END - 255)) // 1023-255=768
-
-// 存储布局： [len(1B)] [data(32B)] [hash(4B)] 共 37B，用掉尾区很小一部分
-#define MAX_STORE 32
-
-#define EE_LEN_ADDR (EE_TAIL_BASE + 0)
-#define EE_DATA_ADDR (EE_TAIL_BASE + 1)             // 32B
-#define EE_HASH_ADDR (EE_TAIL_BASE + 1 + MAX_STORE) // 4B
 
 #define PMOS_CTRL_PIN 5
-#define SERIAL_BUFFER_SIZE 128
 
 #define COUNTDOWN_EXAM 0
 #define COUNTDOWN_MEET 1
-char serialBuffer[SERIAL_BUFFER_SIZE];
+#define MODE_INIT_SYNC 0
+#define MODE_SEND_HAPPY 1
+#define MODE_SEND_MISS_U 2
+#define MODE_SEND_TIRED 3
+#define MODE_RECEIVE_MESSAGE 4
+#define MESSAGE_LINE_CHARS 36
+#define MESSAGE_FIRST_LINE_Y 80
+#define MESSAGE_LINE_STEP_Y 16
+
+enum MqttResult : int8_t
+{
+  MQTT_RESULT_OK = 0,
+  MQTT_RESULT_CONNECT_FAILED = -1,
+  MQTT_RESULT_NO_MESSAGE = -2
+};
 
 RTC_DS3231 rtc;
 Epd epd;
 unsigned char image[512];
 Paint paint(image, 0, 0); // width should be the multiple of 8
 char buf[256];
-DateTime examDate(2025, 12, 20);
+DateTime examDate(2025, 12, 20, 0, 0, 0);
 
-bool firstFlag = true; // 用于第一次显示时间时的特殊处理
-volatile bool wakeUp = false;
 volatile bool alarmTriggered = false;
 volatile bool button1Pressed = false; // D2
 volatile bool button2Pressed = false; // D3
 volatile bool button3Pressed = false; // A7
 
-DateTime lastDisplayTime; // 全局变量，记录上一次显示的时间（建议只比较年月日）
 uint8_t lastDay = 255;
-uint16_t todayMin = 0;
-uint32_t totalMin = 0;
-char timeBuf_old[6];
 
 // ——— 任务调度参数 ———
 const uint8_t TASK_BASE_H = 2;   // 起点小时 2 (= 02:05)
@@ -66,9 +63,11 @@ static uint8_t lastTaskDay = 0xFF;
 static int8_t lastTaskHour = -1;
 
 SystemState currentState = STATE_EXAM_COUNTDOWN;
-SystemState lastState = STATE_EXAM_COUNTDOWN;
 void switchState(EventType event);
 void setupNextAlarm();
+static void renderCurrentCountdown();
+static bool parseDatePairPayload(const char *payload);
+static void setupWakePins();
 
 extern "C"
 {
@@ -84,30 +83,87 @@ static int16_t free_ram_now(void)
   return (int16_t)(&top - heap_end); // 328 系列 2KB，int16 足够
 }
 
-void reset()
+static void reset()
 {
   // 启动看门狗定时器，设定一个短的超时时间（15ms）
   wdt_enable(WDTO_15MS);
   while (1)
     ; // 等待看门狗超时并复位设备
 }
-// FNV-1a 32-bit：快 & 小 & 无表
-static inline uint32_t fnv1a32(const uint8_t *p, size_t n)
+
+static bool parseYymmdd(const char *s, DateTime &out)
 {
-  uint32_t h = 2166136261UL; // offset basis
-  while (n--)
+  if (!s || strlen(s) != 6)
+    return false;
+
+  for (uint8_t i = 0; i < 6; ++i)
   {
-    h ^= *p++;
-    h *= 16777619UL; // FNV prime
+    if (s[i] < '0' || s[i] > '9')
+      return false;
   }
-  return h;
+
+  const uint16_t year = 2000 + (s[0] - '0') * 10 + (s[1] - '0');
+  const uint8_t month = (s[2] - '0') * 10 + (s[3] - '0');
+  const uint8_t day = (s[4] - '0') * 10 + (s[5] - '0');
+  static const uint8_t daysInMonth[] PROGMEM = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (month < 1 || month > 12 || day < 1)
+    return false;
+  uint8_t maxDay = pgm_read_byte(&daysInMonth[month - 1]);
+  if (month == 2 && ((year % 4) == 0))
+    maxDay = 29;
+  if (day > maxDay)
+    return false;
+
+  DateTime candidate(year, month, day, 0, 0, 0);
+
+  out = candidate;
+  return true;
 }
 
-// 用法：对 buf 的“有效长度 n”做摘要
-// 例如 n = min((size_t)decl_len, strlen(buf), 32)
-
-int checkMessages_debug(int mode)
+static char *trimToken(char *s)
 {
+  while (*s == ' ' || *s == '\t')
+    ++s;
+
+  char *end = s + strlen(s);
+  while (end > s && (end[-1] == ' ' || end[-1] == '\t'))
+  {
+    *--end = '\0';
+  }
+  return s;
+}
+
+static bool parseDatePairPayload(const char *payload)
+{
+  char tmp[16];
+  size_t n = 0;
+
+  while (payload && payload[n] && payload[n] != '\r' && payload[n] != '\n' && n < sizeof(tmp) - 1)
+  {
+    tmp[n] = payload[n];
+    ++n;
+  }
+  tmp[n] = '\0';
+
+  char *comma = strchr(tmp, ',');
+  if (!comma)
+    return false;
+
+  *comma = '\0';
+  DateTime newExam;
+  DateTime newMeet;
+  if (!parseYymmdd(trimToken(tmp), newExam) || !parseYymmdd(trimToken(comma + 1), newMeet))
+    return false;
+
+  examDate = newExam;
+  eepromSaveTargetDate(EEPROM_DATE_EXAM, newExam);
+  eepromSaveTargetDate(EEPROM_DATE_MEET, newMeet);
+  return true;
+}
+
+static MqttResult checkMessages_debug(uint8_t mode)
+{
+  MqttResult result = MQTT_RESULT_OK;
   uint8_t idx2 = 0;
   uint32_t t2;
   bool tcp_ok = false;
@@ -180,7 +236,7 @@ int checkMessages_debug(int mode)
           buf[idx2] = '\0';
         }
 
-        if (strstr_P(buf, PSTR("+CEREG: 0,1")))
+        if (strstr_P(buf, PSTR("+CEREG: 0,1")) || strstr_P(buf, PSTR("+CEREG: 0,5")))
         {
           registered = true;
           break; // 注册成功
@@ -206,7 +262,7 @@ int checkMessages_debug(int mode)
   {
     // 10 次都失败，直接返回
     digitalWrite(PMOS_CTRL_PIN, HIGH); // 关闭电源
-    return -1;
+    return MQTT_RESULT_CONNECT_FAILED;
   }
 
   delay(500);
@@ -260,7 +316,7 @@ int checkMessages_debug(int mode)
   {
     // 5 次都失败，直接返回
     digitalWrite(PMOS_CTRL_PIN, HIGH); // 关闭电源
-    return -1;
+    return MQTT_RESULT_CONNECT_FAILED;
   }
 
   delay(500);
@@ -344,7 +400,15 @@ int checkMessages_debug(int mode)
     }
   */
 
-  Serial.println(F("AT+MCONFIG=\"wjy_air780e\",\"wjy\",\"1234asdf\",1,1,\"wjy_air780e/status\",\"connection lost\""));
+  Serial.print(F("AT+MCONFIG=\""));
+  Serial.print(F(MQTT_CLIENT_ID));
+  Serial.print(F("\",\""));
+  Serial.print(F(MQTT_USER));
+  Serial.print(F("\",\""));
+  Serial.print(F(MQTT_PASS));
+  Serial.print(F("\",1,1,\""));
+  Serial.print(F(MQTT_STATUS_TOPIC));
+  Serial.println(F("\",\"connection lost\""));
   Serial.flush();
   delay(500);
 
@@ -358,7 +422,10 @@ int checkMessages_debug(int mode)
     idx2 = 0;
     memset(buf, 0, sizeof(buf));
 
-    Serial.println(F("AT+MIPSTART=\"cow.milkcat.cc\",1883"));
+    Serial.print(F("AT+MIPSTART=\""));
+    Serial.print(F(MQTT_BROKER));
+    Serial.print(F("\","));
+    Serial.println(MQTT_PORT);
     Serial.flush();
     delay(100);
     t2 = millis();
@@ -397,11 +464,10 @@ int checkMessages_debug(int mode)
   }
   if (!tcp_ok)
   {
-    // 5 次都失败，直接返回
+    // TCP 连接失败，直接返回
     digitalWrite(PMOS_CTRL_PIN, HIGH); // 关闭电源
-    return -1;
+    return MQTT_RESULT_CONNECT_FAILED;
   }
-  delay(500);
 
   for (uint8_t i = 0; i < 5; i++)
   {
@@ -413,7 +479,10 @@ int checkMessages_debug(int mode)
     idx2 = 0;
     memset(buf, 0, sizeof(buf));
 
-    Serial.println(F("AT+MCONNECT=0,60"));
+    Serial.print(F("AT+MCONNECT="));
+    Serial.print(MQTT_CLEAN_SESSION);
+    Serial.print(F(","));
+    Serial.println(MQTT_KEEPALIVE_SEC);
     Serial.flush();
     delay(100);
     t2 = millis();
@@ -455,20 +524,19 @@ int checkMessages_debug(int mode)
   {
     // 5 次都失败，直接返回
     digitalWrite(PMOS_CTRL_PIN, HIGH); // 关闭电源
-    return -1;
+    return MQTT_RESULT_CONNECT_FAILED;
   }
 
   delay(500);
   Serial.println(F("AT+MQTTMSGSET=0"));
   Serial.flush();
   delay(500);
-  // 计算电压（整数毫伏）
-  uint32_t v = (uint32_t)voltage * 336 / 100; // voltage * 3.36
-
   // 拼接到 payload 后面
   memset(buf, 0, sizeof(buf));
-  snprintf(buf, sizeof(buf), "%u,%u", (unsigned int)v, (unsigned int)free_ram_now());
-  Serial.print(F("AT+MPUB=\"wjy_air780e/status\",1,1,\""));
+  snprintf(buf, sizeof(buf), "%u,%d", (unsigned int)voltage, (int)free_ram_now());
+  Serial.print(F("AT+MPUB=\""));
+  Serial.print(F(MQTT_STATUS_TOPIC));
+  Serial.print(F("\",1,1,\""));
   Serial.print(buf);
   Serial.print(F("\"\r\n"));
   Serial.flush();
@@ -476,9 +544,11 @@ int checkMessages_debug(int mode)
   delay(2000);
 
   // 发送 AT 命令
-  if (mode != 4)
+  if (mode != MODE_RECEIVE_MESSAGE)
   {
-    Serial.println(F("AT+MSUB=\"wjy_air780e/cmd\",1"));
+    Serial.print(F("AT+MSUB=\""));
+    Serial.print(F(MQTT_CMD_TOPIC));
+    Serial.println(F("\",1"));
     Serial.flush();
 
     memset(buf, 0, sizeof(buf));
@@ -519,110 +589,7 @@ int checkMessages_debug(int mode)
             while (*p == ' ')
               ++p; // 去掉空格
 
-            char tmp[16]; // "ddmmyy,ddmmyy" 最多 13 字节
-            size_t n = 0;
-            while (p[n] && p[n] != '\r' && p[n] != '\n' && n < sizeof(tmp) - 1)
-            {
-              tmp[n] = p[n];
-              ++n;
-            }
-            tmp[n] = '\0';
-
-            // --- 切成两个字段 ---
-            char *comma = strchr(tmp, ',');
-            if (comma)
-            {
-              *comma = '\0';
-              char *s1 = tmp;       // 第一个 ddmmyy
-              char *s2 = comma + 1; // 第二个 ddmmyy
-
-              // 校验长度与字符
-              auto ok6 = [](const char *s) -> bool
-              {
-                if (!s)
-                  return false;
-                if (strlen(s) != 6)
-                  return false;
-                for (uint8_t i = 0; i < 6; ++i)
-                {
-                  if (s[i] < '0' || s[i] > '9')
-                    return false;
-                }
-                return true;
-              };
-
-              if (ok6(s1) && ok6(s2))
-              {
-                // 解析 "ddmmyy"
-                auto parse_ddmmyy = [](const char *s, uint16_t &Y, uint8_t &M, uint8_t &D)
-                {
-                  D = (s[4] - '0') * 10 + (s[5] - '0');
-                  M = (s[2] - '0') * 10 + (s[3] - '0');
-                  uint8_t yy = (s[0] - '0') * 10 + (s[1] - '0');
-                  Y = 2000 + yy;
-                };
-
-                uint16_t Y1, Y2;
-                uint8_t M1, D1, M2, D2;
-                parse_ddmmyy(s1, Y1, M1, D1);
-                parse_ddmmyy(s2, Y2, M2, D2);
-
-                // 简单合法性检查
-                auto valid = [](uint16_t Y, uint8_t M, uint8_t D) -> bool
-                {
-                  if (Y < 2000 || Y > 2255)
-                    return false;
-                  if (M < 1 || M > 12)
-                    return false;
-                  if (D < 1 || D > 31)
-                    return false; // 简化月天数校验
-                  return true;
-                };
-
-                if (valid(Y1, M1, D1) && valid(Y2, M2, D2))
-                {
-                  DateTime dt1(Y1, M1, D1, 0, 0, 0);
-                  DateTime dt2(Y2, M2, D2, 0, 0, 0);
-
-                  // 保存到 EEPROM（采用你前面改过的带 ID 版本）
-                  if (examDate.year() != Y1 || examDate.month() != M1 || examDate.day() != D1)
-                  {
-                    examDate = dt1;
-                  }
-                  DateTime dt3;
-                  eepromLoadTargetDate(dt3);
-                  if (dt3.year() != Y2 || dt3.month() != M2 || dt3.day() != D2)
-                  {
-                    eepromSaveTargetDate(dt2);
-                  }
-
-                  /*
-                   Serial.print(F("Date1 saved (ID=1): "));
-                   Serial.print(dt1.year());
-                   Serial.print('-');
-                   Serial.print(dt1.month());
-                   Serial.print('-');
-                   Serial.println(dt1.day());
-
-                   Serial.print(F("Date2 saved (ID=2): "));
-                   Serial.print(dt2.year());
-                   Serial.print('-');
-                   Serial.print(dt2.month());
-                   Serial.print('-');
-                   Serial.println(dt2.day());
-                   */
-                }
-                else
-                {
-                }
-              }
-              else
-              {
-              }
-            }
-            else
-            {
-            }
+            (void)parseDatePairPayload(p);
           }
           else
           {
@@ -634,25 +601,23 @@ int checkMessages_debug(int mode)
         // 不是 +MSUB: 的行，清空缓冲，继续等下一行
         idx2 = 0;
         buf[0] = '\0';
-
-        // 不是 +MSUB: 的行，清空缓冲，继续等下一行
-        idx2 = 0;
-        buf[0] = '\0';
       }
     }
   }
-  if (mode == 1 || mode == 2 || mode == 3)
+  if (mode == MODE_SEND_HAPPY || mode == MODE_SEND_MISS_U || mode == MODE_SEND_TIRED)
   {
-    Serial.print(F("AT+MPUB=\"wjy_air780e/tx\",1,0,\""));
-    if (mode == 1)
+    Serial.print(F("AT+MPUB=\""));
+    Serial.print(F(MQTT_TX_TOPIC));
+    Serial.print(F("\",1,0,\""));
+    if (mode == MODE_SEND_HAPPY)
     {
       Serial.print(F("Happy"));
     }
-    else if (mode == 2)
+    else if (mode == MODE_SEND_MISS_U)
     {
       Serial.print(F("Miss u"));
     }
-    else if (mode == 3)
+    else if (mode == MODE_SEND_TIRED)
     {
       Serial.print(F("Tired"));
     }
@@ -660,12 +625,14 @@ int checkMessages_debug(int mode)
     Serial.print(F("\"\r\n"));
     Serial.flush();
   }
-  else if (mode == 4)
+  else if (mode == MODE_RECEIVE_MESSAGE)
   {
     bool rx_ok = false;
     bool overflow = false; // 本行是否已溢出
     bool is_msub = false;  // 本行是否 +MSUB:（即便溢出也要记住）
-    Serial.println(F("AT+MSUB=\"wjy_air780e/rx\",1"));
+    Serial.print(F("AT+MSUB=\""));
+    Serial.print(F(MQTT_RX_TOPIC));
+    Serial.println(F("\",1"));
     Serial.flush();
 
     memset(buf, 0, sizeof(buf));
@@ -738,10 +705,11 @@ int checkMessages_debug(int mode)
 
     if (rx_ok)
     {
+      bool parsed = false;
       // 收到 +MSUB: 行
 
       // 假定此时 buf 里是一整行，且已去掉行尾 \r\n
-      // 例：+MSUB: "wjy_air780e/rx",14 byte,hello world!
+      // 例：+MSUB: "epaper2/rx",14 byte,hello world!
 
       char *p1 = strchr(buf, ','); // 第一个逗号（topic 后）
       if (p1)
@@ -783,10 +751,21 @@ int checkMessages_debug(int mode)
 
           memmove(buf, msg, n);
           buf[n] = '\0';
+          parsed = true;
         }
       }
 
       // 处理接收到的消息
+      if (!parsed)
+      {
+        buf[0] = '\0';
+        result = MQTT_RESULT_NO_MESSAGE;
+      }
+    }
+    else
+    {
+      buf[0] = '\0';
+      result = MQTT_RESULT_NO_MESSAGE;
     }
   }
   delay(500);
@@ -800,12 +779,12 @@ int checkMessages_debug(int mode)
   delay(500);
 
   digitalWrite(PMOS_CTRL_PIN, HIGH); // 关闭电源
-  return 0;
+  return result;
 }
 
 bool mqtt_receive(void)
 {
-  int mqtt_len = 0;
+  uint16_t mqtt_len = 0;
   alarmTriggered = false;
   button1Pressed = false;
   button2Pressed = false;
@@ -821,53 +800,56 @@ bool mqtt_receive(void)
   paint.SetHeight(256);
   paint.SetRotate(ROTATE_90);
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, "Receiving Message......", &Font12, COLORED);
-  epd.SetFrameMemory_Partial(paint.GetImage(), 110, 20, paint.GetWidth(), paint.GetHeight());
-  epd.DisplayFrame_Partial();
+  paint.DrawStringAt_P(0, 0, PSTR("Receiving Message......"), &Font12, COLORED);
+  epd.SetFrameMemory_Base(paint.GetImage(), 110, 20, paint.GetWidth(), paint.GetHeight());
+  epd.DisplayFrame();
 
-  int r = checkMessages_debug(4);
-  if (r == -1)
+  MqttResult r = checkMessages_debug(MODE_RECEIVE_MESSAGE);
+  if (r != MQTT_RESULT_OK || buf[0] == '\0')
   {
     paint.Clear(UNCOLORED);
-    paint.DrawStringAt(0, 0, "Message receive failed.", &Font12, COLORED);
-    epd.SetFrameMemory_Partial(paint.GetImage(), 110, 20, paint.GetWidth(), paint.GetHeight());
-    epd.DisplayFrame_Partial();
+    paint.DrawStringAt_P(0, 0, PSTR("Message receive failed."), &Font12, COLORED);
+    epd.SetFrameMemory_Base(paint.GetImage(), 110, 20, paint.GetWidth(), paint.GetHeight());
+    epd.DisplayFrame();
     return false;
   }
-  mqtt_len = strlen(buf);
+  mqtt_len = (uint16_t)strlen(buf);
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, " ", &Font12, COLORED);
-  epd.SetFrameMemory_Partial(paint.GetImage(), 110, 20, paint.GetWidth(), paint.GetHeight());
-  epd.DisplayFrame_Partial();
+  paint.DrawStringAt_P(0, 0, PSTR(" "), &Font12, COLORED);
+  epd.SetFrameMemory_Base(paint.GetImage(), 110, 20, paint.GetWidth(), paint.GetHeight());
+  epd.DisplayFrame();
   delay(100);
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, "Message Updated", &Font12, COLORED);
-  epd.SetFrameMemory_Partial(paint.GetImage(), 110, 20, paint.GetWidth(), paint.GetHeight());
+  paint.DrawStringAt_P(0, 0, PSTR("Message Updated"), &Font12, COLORED);
+  epd.SetFrameMemory_Base(paint.GetImage(), 110, 20, paint.GetWidth(), paint.GetHeight());
   paint.Clear(UNCOLORED);
   // 分行绘制
-  for (uint16_t i = 0; i < mqtt_len; i += 36)
+  for (uint16_t i = 0, line = 0; i < mqtt_len; i += MESSAGE_LINE_CHARS, ++line)
   {
-    // 临时把多余部分截断成一行（直接操作 buf）
-    char c = buf[i + 36]; // 保存第37个字符
-    if (i + 36 < mqtt_len)
+    int16_t y = MESSAGE_FIRST_LINE_Y - line * MESSAGE_LINE_STEP_Y;
+    if (y < 0)
+      break;
+
+    char c = '\0';
+    if (i + MESSAGE_LINE_CHARS < mqtt_len)
     {
-      buf[i + 36] = '\0'; // 截断成当前行
+      c = buf[i + MESSAGE_LINE_CHARS];
+      buf[i + MESSAGE_LINE_CHARS] = '\0'; // 截断成当前行
     }
-    // y = 30, 70, 110 ...（你可以改成基于 i 的偏移量）
-    uint16_t y = 80 - (i / 36) * 16; // 每行16像素高
+
     paint.DrawStringAt(0, 0, buf + i, &Font12, COLORED);
-    epd.SetFrameMemory_Partial(paint.GetImage(), y, 20, paint.GetWidth(), paint.GetHeight());
-    // 恢复 buf 内容，继续下一轮
-    if (i + 36 < mqtt_len)
+    epd.SetFrameMemory_Base(paint.GetImage(), y, 20, paint.GetWidth(), paint.GetHeight());
+
+    if (i + MESSAGE_LINE_CHARS < mqtt_len)
     {
-      buf[i + 36] = c;
+      buf[i + MESSAGE_LINE_CHARS] = c;
     }
     paint.Clear(UNCOLORED);
   }
-  epd.DisplayFrame_Partial();
+  epd.DisplayFrame();
   delay(2000);
 
-  return 0;
+  return true;
 }
 
 bool mqtt_send(void)
@@ -887,20 +869,20 @@ bool mqtt_send(void)
   paint.SetHeight(256);
   paint.SetRotate(ROTATE_90);
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, "v", &Font20, COLORED);
-  epd.SetFrameMemory_Partial(paint.GetImage(), 0, 55, paint.GetWidth(), paint.GetHeight());
-  epd.SetFrameMemory_Partial(paint.GetImage(), 0, 115, paint.GetWidth(), paint.GetHeight());
-  epd.SetFrameMemory_Partial(paint.GetImage(), 0, 170, paint.GetWidth(), paint.GetHeight());
+  paint.DrawStringAt_P(0, 0, PSTR("v"), &Font20, COLORED);
+  epd.SetFrameMemory_Base(paint.GetImage(), 0, 55, paint.GetWidth(), paint.GetHeight());
+  epd.SetFrameMemory_Base(paint.GetImage(), 0, 115, paint.GetWidth(), paint.GetHeight());
+  epd.SetFrameMemory_Base(paint.GetImage(), 0, 170, paint.GetWidth(), paint.GetHeight());
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, "Happy    Miss u    Tired", &Font12, COLORED);
-  epd.SetFrameMemory_Partial(paint.GetImage(), 24, 30, paint.GetWidth(), paint.GetHeight());
+  paint.DrawStringAt_P(0, 0, PSTR("Happy    Miss u    Tired"), &Font12, COLORED);
+  epd.SetFrameMemory_Base(paint.GetImage(), 24, 30, paint.GetWidth(), paint.GetHeight());
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 0, "Press to Send Message:", &Font12, COLORED);
-  epd.SetFrameMemory_Partial(paint.GetImage(), 80, 30, paint.GetWidth(), paint.GetHeight());
-  epd.DisplayFrame_Partial();
+  paint.DrawStringAt_P(0, 0, PSTR("Press to Send Message:"), &Font12, COLORED);
+  epd.SetFrameMemory_Base(paint.GetImage(), 80, 30, paint.GetWidth(), paint.GetHeight());
+  epd.DisplayFrame();
 
   unsigned long t3 = millis();
-  int display_type = 0;
+  uint8_t display_type = 0;
 
   while (millis() - t3 < 15000)
   {
@@ -910,7 +892,7 @@ bool mqtt_send(void)
       button1Pressed = false;
       button2Pressed = false;
       button3Pressed = false;
-      display_type = 1;
+      display_type = MODE_SEND_HAPPY;
       break;
     }
     else if (button2Pressed)
@@ -918,7 +900,7 @@ bool mqtt_send(void)
       button1Pressed = false;
       button2Pressed = false;
       button3Pressed = false;
-      display_type = 2;
+      display_type = MODE_SEND_MISS_U;
       break;
     }
     else if (button3Pressed)
@@ -926,37 +908,37 @@ bool mqtt_send(void)
       button1Pressed = false;
       button2Pressed = false;
       button3Pressed = false;
-      display_type = 3;
+      display_type = MODE_SEND_TIRED;
       break;
     }
     delay(50);
   }
-  if (display_type == 1 || display_type == 2 || display_type == 3)
+  if (display_type == MODE_SEND_HAPPY || display_type == MODE_SEND_MISS_U || display_type == MODE_SEND_TIRED)
   {
     paint.Clear(UNCOLORED);
-    epd.SetFrameMemory_Partial(paint.GetImage(), 80, 30, paint.GetWidth(), paint.GetHeight());
-    epd.DisplayFrame_Partial();
+    epd.SetFrameMemory_Base(paint.GetImage(), 80, 30, paint.GetWidth(), paint.GetHeight());
+    epd.DisplayFrame();
     delay(100);
-    paint.DrawStringAt(0, 0, "Sending Message......", &Font12, COLORED);
-    epd.SetFrameMemory_Partial(paint.GetImage(), 80, 30, paint.GetWidth(), paint.GetHeight());
-    epd.DisplayFrame_Partial();
+    paint.DrawStringAt_P(0, 0, PSTR("Sending Message......"), &Font12, COLORED);
+    epd.SetFrameMemory_Base(paint.GetImage(), 80, 30, paint.GetWidth(), paint.GetHeight());
+    epd.DisplayFrame();
 
-    int r = checkMessages_debug(display_type);
+    MqttResult r = checkMessages_debug(display_type);
     paint.Clear(UNCOLORED);
 
-    epd.SetFrameMemory_Partial(paint.GetImage(), 80, 30, paint.GetWidth(), paint.GetHeight());
-    epd.DisplayFrame_Partial();
+    epd.SetFrameMemory_Base(paint.GetImage(), 80, 30, paint.GetWidth(), paint.GetHeight());
+    epd.DisplayFrame();
     delay(100);
-    if (r == 0)
+    if (r == MQTT_RESULT_OK)
     {
-      paint.DrawStringAt(0, 0, "Sending Success!", &Font12, COLORED);
+      paint.DrawStringAt_P(0, 0, PSTR("Sending Success!"), &Font12, COLORED);
     }
     else
     {
-      paint.DrawStringAt(0, 0, "Sending Failed!", &Font12, COLORED);
+      paint.DrawStringAt_P(0, 0, PSTR("Sending Failed!"), &Font12, COLORED);
     }
-    epd.SetFrameMemory_Partial(paint.GetImage(), 80, 30, paint.GetWidth(), paint.GetHeight());
-    epd.DisplayFrame_Partial();
+    epd.SetFrameMemory_Base(paint.GetImage(), 80, 30, paint.GetWidth(), paint.GetHeight());
+    epd.DisplayFrame();
     delay(10000);
   }
   else
@@ -964,20 +946,25 @@ bool mqtt_send(void)
     epd.ClearFrameMemory(0xFF); // 全白刷新屏幕
     epd.DisplayFrame();
     delay(100);
-    switchState(EVENT_BUTTON1);
     return false;
   }
 
   epd.ClearFrameMemory(0xFF); // 全白刷新屏幕
   epd.DisplayFrame();
   delay(1000);
-  switchState(EVENT_BUTTON1);
   return true;
 }
+
+static void renderCurrentCountdown()
+{
+  initCountdownPanel(currentState == STATE_MEET_COUNTDOWN ? COUNTDOWN_MEET : COUNTDOWN_EXAM);
+  epd.DisplayFrame();
+  epd.Sleep();
+}
+
 void switchState(EventType event)
 {
   // 状态迁移逻辑：输入事件 + 当前状态 => 下一个状态
-  lastState = currentState;
   switch (currentState)
   {
   case STATE_EXAM_COUNTDOWN:
@@ -1020,30 +1007,27 @@ void switchState(EventType event)
     // 不允许退出低电状态，直到重启或唤醒
     return;
   }
-  DateTime now;
+
   switch (currentState)
   {
   case STATE_EXAM_COUNTDOWN:
-    initCountdownPanel(0);
-    epd.DisplayFrame();
-    now = rtc.now();
-    renderClockPanel(&now, &firstFlag, timeBuf_old);
-    // displayTime(rtc.now());
+    renderCurrentCountdown();
     break;
   case STATE_MEET_COUNTDOWN:
-    initCountdownPanel(1);
-    epd.DisplayFrame();
-    now = rtc.now();
-    renderClockPanel(&now, &firstFlag, timeBuf_old);
-    // displayTime(rtc.now());
+    renderCurrentCountdown();
     break;
 
   case STATE_MQTT_SEND:
-    mqtt_send();
-
+    (void)mqtt_send();
+    currentState = STATE_EXAM_COUNTDOWN;
+    renderCurrentCountdown();
+    setupNextAlarm();
     break;
   case STATE_MQTT_MESSAGE:
-    mqtt_receive();
+    (void)mqtt_receive();
+    currentState = STATE_EXAM_COUNTDOWN;
+    renderCurrentCountdown();
+    setupNextAlarm();
     break;
   case STATE_LOW_BATTERY:
     // renderLowBatteryScreen();
@@ -1096,10 +1080,7 @@ void handleRtcAlarmEvent()
   {
     lastDay = now.day();                 // 更新记录
     currentState = STATE_EXAM_COUNTDOWN; // 重置状态为考试倒计时
-    todayMin = 0;                        // 重置今天的分钟数
-    initCountdownPanel(0);
-    epd.DisplayFrame();
-    // displayTime(now);                     // 显示当前时间
+    renderCurrentCountdown();
     setupNextAlarm(); // 设置下一分钟的闹钟
     reset();
     return; // 直接返回，不再继续执行
@@ -1118,15 +1099,11 @@ void handleRtcAlarmEvent()
   switch (currentState)
   {
   case STATE_EXAM_COUNTDOWN:
-    initCountdownPanel(0);
-    renderClockPanel(&now, &firstFlag, timeBuf_old);
-    // displayTime(now);
+    renderCurrentCountdown();
     break;
 
   case STATE_MEET_COUNTDOWN:
-    initCountdownPanel(1);
-    renderClockPanel(&now, &firstFlag, timeBuf_old);
-    // displayTime(now);
+    renderCurrentCountdown();
     break;
 
   case STATE_MQTT_SEND:
@@ -1148,9 +1125,8 @@ void enterDeepSleep()
   // 设置为掉电模式
   ADCSRA &= ~_BV(ADEN);
   set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-  sleep_enable();
-  // 关闭 BOD（Brown-Out Detector），降低睡眠功耗
   cli(); // 进入原子操作区
+  sleep_enable();
   sleep_bod_disable();
   sei(); // 开启中断（必须在 sleep_cpu() 前）
 
@@ -1198,90 +1174,109 @@ void setupNextAlarm()
   rtc.setAlarm1(alarmTime, DS3231_A1_Second);
 }
 
+static void setupWakePins()
+{
+  pinMode(2, INPUT_PULLUP); // INT0
+  pinMode(3, INPUT_PULLUP); // INT1
+  EIMSK |= (1 << INT0) | (1 << INT1);
+  EICRA = (EICRA & ~((1 << ISC00) | (1 << ISC10))) | (1 << ISC01) | (1 << ISC11);
+
+  pinMode(A1, INPUT_PULLUP);
+  PCICR |= (1 << PCIE1);
+  PCMSK1 |= (1 << PCINT9);
+
+  pinMode(13, INPUT_PULLUP); // DS3231 INT, open-drain
+  PCICR |= (1 << PCIE0);
+  PCMSK0 |= (1 << PCINT5);
+}
+
 void setup()
 {
   Serial.begin(9600);
+  digitalWrite(PMOS_CTRL_PIN, HIGH);
   pinMode(PMOS_CTRL_PIN, OUTPUT);
-  delay(30000);//等待电容充电
-  checkMessages_debug(0);//获取初始化日期参数
-
-  // 配置 D2、D3 为上拉输入
-  pinMode(2, INPUT_PULLUP);             // INT0
-  pinMode(3, INPUT_PULLUP);             // INT1
-  EIMSK |= (1 << INT0) | (1 << INT1);   // 启用外部中断 INT0 / INT1
-  EICRA |= (1 << ISC01) | (1 << ISC11); // 下降沿触发 INT0 / INT1
-  pinMode(A1, INPUT_PULLUP);            // PCINT23
-  PCICR |= (1 << PCIE1);                // 启用 Port C（PCINT[14:8]）的中断功能
-  PCMSK1 |= (1 << PCINT9);              // 允许 A1（PC1）电平变化触发中断
+  digitalWrite(PMOS_CTRL_PIN, HIGH);
+  setupWakePins();
+  batteryMonitorBegin();
 
   Wire.begin();
   delay(10);
-  epd.Init();
-  epd.ClearFrameMemory(0xFF); // 全白刷新屏幕
-  epd.DisplayFrame();
-  delay(100);
-
-  batteryMonitorBegin(); // 初始化电量检测
-  uint16_t batteryVoltage = readBatteryVoltage_mv();
-  if (batteryVoltage < 800) // 800*3.69=3038mV
-  {
-    currentState = STATE_LOW_BATTERY;
-    // renderLowBatteryScreen();
-    enterDeepSleep(); // 进入深度睡眠
-  }
   if (!rtc.begin())
   {
     while (1)
       delay(10);
   }
+
+  epd.Init();
+  epd.ClearFrameMemory(0xFF); // 全白刷新屏幕
+  epd.DisplayFrame();
   delay(100);
-  pinMode(13, INPUT_PULLUP); // D13连接DS3231 INT，开漏，必须上拉
+
+  uint16_t batteryVoltage = readBatteryVoltage_mv();
+  if (batteryVoltage < LOW_BATTERY_MV)
+  {
+    currentState = STATE_LOW_BATTERY;
+    paint.SetWidth(16);
+    paint.SetHeight(160);
+    paint.SetRotate(ROTATE_90);
+    paint.Clear(UNCOLORED);
+    paint.DrawStringAt_P(0, 0, PSTR("LOW BATTERY"), &Font12, COLORED);
+    epd.SetFrameMemory_Base(paint.GetImage(), 64, 40, paint.GetWidth(), paint.GetHeight());
+    epd.DisplayFrame();
+    epd.Sleep();
+    while (1)
+    {
+      enterDeepSleep();
+    }
+  }
+
+  DateTime savedExam;
+  if (eepromLoadTargetDate(EEPROM_DATE_EXAM, savedExam))
+  {
+    examDate = savedExam;
+  }
+
+  delay(30000);              // 等待电容充电
+  checkMessages_debug(MODE_INIT_SYNC); // 获取初始化日期参数
+
   // 禁用DS3231方波，启用中断模式
   rtc.writeSqwPinMode(DS3231_OFF);
-  // 启用 PCINT0 中断，PCINT5 = D13
-  PCICR |= (1 << PCIE0);   // 使能 Port B（PB0–PB7）的 PCINT 中断
-  PCMSK0 |= (1 << PCINT5); // 启用 D13 的 PCINT
   DateTime now = rtc.now();
   lastDay = now.day();
-  initCountdownPanel(COUNTDOWN_EXAM);
-  epd.DisplayFrame();
-  now = rtc.now();
-  renderClockPanel(&now, &firstFlag, timeBuf_old);
-  // displayTime(rtc.now());  // 显示当前时间
+  currentState = STATE_EXAM_COUNTDOWN;
+  renderCurrentCountdown();
   setupNextAlarm();
-  lastDisplayTime = rtc.now();
 }
 
 void loop()
 {
-  wakeUp = false;
+  noInterrupts();
+  bool hasPendingEvent = button1Pressed || button2Pressed || button3Pressed || alarmTriggered;
+  interrupts();
+
+  if (!hasPendingEvent)
+    enterDeepSleep();
+
+  noInterrupts();
+  bool handleButton1 = button1Pressed;
+  bool handleButton2 = button2Pressed;
+  bool handleButton3 = button3Pressed;
+  bool handleAlarm = alarmTriggered;
+  button1Pressed = false;
+  button2Pressed = false;
+  button3Pressed = false;
   alarmTriggered = false;
-  enterDeepSleep();
+  interrupts();
 
-  if (button1Pressed)
-  {
-    button1Pressed = false;
+  if (handleButton1)
     switchState(EVENT_BUTTON1);
-    button1Pressed = false;
-  }
 
-  if (button2Pressed)
-  {
-    button2Pressed = false;
+  if (handleButton2)
     switchState(EVENT_BUTTON2);
-    button2Pressed = false;
-  }
 
-  if (button3Pressed)
-  {
-    button3Pressed = false;
+  if (handleButton3)
     switchState(EVENT_BUTTON3);
-    button3Pressed = false;
-  }
 
-  if (alarmTriggered)
-  {
-    alarmTriggered = false;
+  if (handleAlarm)
     handleRtcAlarmEvent();
-  }
 }

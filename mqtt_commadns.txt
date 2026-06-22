@@ -1,14 +1,17 @@
 AT+CEREG?
 AT+CIPGSMLOC=1,1
-
 AT+CCLK?
 
-AT+MCONFIG="wjy_air780e","wjy","1234asdf",1,1,"wjy_air780e/status","offline"
-AT+MIPSTART="cow.milkcat.cc",1883
-AT+MCONNECT=0,60
+AT+MCONFIG="epaper2","CHANGE_ME","CHANGE_ME",1,1,"epaper2/status","offline"
+AT+MIPSTART="example.com",1883
+AT+MCONNECT=1,60
+
+AT+MSUB="epaper2/cmd",1
+AT+MSUB="epaper2/rx",1
+AT+MPUB="epaper2/tx",1,0,"Happy"
+
+# epaper2/cmd date sync payload: YYMMDD,YYMMDD (exam,meet)
+# example payload: 251220,260101
 
 AT+MDISCONNECT
 AT+MIPCLOSE
-
-
-cmd/wjy_air780e

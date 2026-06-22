@@ -16,9 +16,6 @@
 
 void initCountdownPanel(int status);
 
-
-void renderClockPanel(const DateTime* now, bool* firstFlag, char* timeBuf_old);
-
 void renderLowBatteryScreen();
 
 #endif
