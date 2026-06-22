@@ -155,6 +155,7 @@ export function loadIntelHex(hex) {
   const program = new Uint16Array(FLASH_WORDS);
   program.fill(0xffff);
   const bytes = new Uint8Array(program.buffer);
+  const covered = new Uint8Array(bytes.length);
   let upper = 0;
 
   for (const rawLine of hex.split(/\r?\n/)) {
@@ -186,6 +187,7 @@ export function loadIntelHex(hex) {
       for (let i = 0; i < data.length; i += 1) {
         if (base + i < bytes.length) {
           bytes[base + i] = data[i];
+          covered[base + i] = 1;
         }
       }
     } else if (type === 0x01) {
@@ -195,6 +197,7 @@ export function loadIntelHex(hex) {
     }
   }
 
+  program.coveredBytes = covered;
   return program;
 }
 
@@ -2363,6 +2366,7 @@ export class Epaper2Avr {
 
   loadHex(hex) {
     this.program = loadIntelHex(hex);
+    this.flashCovered = this.program.coveredBytes?.slice(0, FLASH_BYTES) ?? new Uint8Array(FLASH_BYTES);
     this.log(`firmware.hex loaded: ${this.program.length * 2} bytes flash image`);
   }
 
@@ -2718,13 +2722,22 @@ export class Epaper2Avr {
 
   flashSummary() {
     const bytes = this.cpu.progBytes.slice(0, FLASH_BYTES);
+    const covered = this.flashCovered?.slice(0, FLASH_BYTES) ?? new Uint8Array(FLASH_BYTES);
     let usedBytes = 0;
+    let coveredBytes = 0;
+    let coveredFfBytes = 0;
     let nonFfBytes = 0;
     let nonZeroBytes = 0;
     for (let i = 0; i < bytes.length; i += 1) {
+      if (covered[i]) {
+        coveredBytes += 1;
+        usedBytes = i + 1;
+        if (bytes[i] === 0xff) {
+          coveredFfBytes += 1;
+        }
+      }
       if (bytes[i] !== 0xff) {
         nonFfBytes += 1;
-        usedBytes = i + 1;
       }
       if (bytes[i] !== 0x00) {
         nonZeroBytes += 1;
@@ -2740,8 +2753,12 @@ export class Epaper2Avr {
       bootEnd: FLASH_BYTES - 1,
       bootBytes: FLASH_BYTES - FLASH_APP_LIMIT_BYTES,
       bytes,
+      covered,
       usedBytes,
       appFreeBytes: Math.max(0, FLASH_APP_LIMIT_BYTES - usedBytes),
+      coveredBytes,
+      coveredFfBytes,
+      uncoveredBytes: FLASH_BYTES - coveredBytes,
       nonFfBytes,
       nonZeroBytes,
       pcByte: this.cpu.pc * 2,

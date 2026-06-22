@@ -2848,6 +2848,7 @@ var Epaper2Avr = (() => {
     const program = new Uint16Array(FLASH_WORDS);
     program.fill(65535);
     const bytes = new Uint8Array(program.buffer);
+    const covered = new Uint8Array(bytes.length);
     let upper = 0;
     for (const rawLine of hex.split(/\r?\n/)) {
       const line = rawLine.trim();
@@ -2876,6 +2877,7 @@ var Epaper2Avr = (() => {
         for (let i = 0; i < data.length; i += 1) {
           if (base + i < bytes.length) {
             bytes[base + i] = data[i];
+            covered[base + i] = 1;
           }
         }
       } else if (type === 1) {
@@ -2884,6 +2886,7 @@ var Epaper2Avr = (() => {
         upper = (data[0] << 8 | data[1]) << 16 >>> 0;
       }
     }
+    program.coveredBytes = covered;
     return program;
   }
   var DS3231Model = class {
@@ -4883,6 +4886,7 @@ var Epaper2Avr = (() => {
     }
     loadHex(hex) {
       this.program = loadIntelHex(hex);
+      this.flashCovered = this.program.coveredBytes?.slice(0, FLASH_BYTES) ?? new Uint8Array(FLASH_BYTES);
       this.log(`firmware.hex loaded: ${this.program.length * 2} bytes flash image`);
     }
     reset() {
@@ -5188,13 +5192,22 @@ var Epaper2Avr = (() => {
     }
     flashSummary() {
       const bytes = this.cpu.progBytes.slice(0, FLASH_BYTES);
+      const covered = this.flashCovered?.slice(0, FLASH_BYTES) ?? new Uint8Array(FLASH_BYTES);
       let usedBytes = 0;
+      let coveredBytes = 0;
+      let coveredFfBytes = 0;
       let nonFfBytes = 0;
       let nonZeroBytes = 0;
       for (let i = 0; i < bytes.length; i += 1) {
+        if (covered[i]) {
+          coveredBytes += 1;
+          usedBytes = i + 1;
+          if (bytes[i] === 255) {
+            coveredFfBytes += 1;
+          }
+        }
         if (bytes[i] !== 255) {
           nonFfBytes += 1;
-          usedBytes = i + 1;
         }
         if (bytes[i] !== 0) {
           nonZeroBytes += 1;
@@ -5210,8 +5223,12 @@ var Epaper2Avr = (() => {
         bootEnd: FLASH_BYTES - 1,
         bootBytes: FLASH_BYTES - FLASH_APP_LIMIT_BYTES,
         bytes,
+        covered,
         usedBytes,
         appFreeBytes: Math.max(0, FLASH_APP_LIMIT_BYTES - usedBytes),
+        coveredBytes,
+        coveredFfBytes,
+        uncoveredBytes: FLASH_BYTES - coveredBytes,
         nonFfBytes,
         nonZeroBytes,
         pcByte: this.cpu.pc * 2,

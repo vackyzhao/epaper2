@@ -245,7 +245,7 @@ class BrowserUi {
     document.getElementById("socSramState").textContent =
       `${mem.sramBytes} B SRAM @ ${hex4(mem.sramStart)}-${hex4(mem.sramEnd)}, nonzero ${mem.nonZeroSramBytes} B`;
     document.getElementById("socFlashState").textContent =
-      `${flash.totalBytes} B flash, image ${flash.usedBytes} B, app free ${flash.appFreeBytes} B`;
+      `${flash.totalBytes} B flash, covered ${flash.coveredBytes} B, app free ${flash.appFreeBytes} B`;
     document.getElementById("socEepromState").textContent =
       `${eeprom.totalBytes} B EEPROM, written ${eeprom.writtenBytes} B, EEAR ${hex4(eeprom.eear)}`;
     document.getElementById("socStackState").textContent = mem.stackPointerOk
@@ -353,6 +353,7 @@ class BrowserUi {
       return;
     }
     const bytes = Array.from(flash.bytes);
+    const covered = Array.from(flash.covered ?? []);
     this.drawByteMap(this.flashMapCtx, "flash", {
       bytes,
       startAddr: flash.start,
@@ -364,10 +365,19 @@ class BrowserUi {
       rowLabelEvery: 16,
       majorLineEvery: 4096,
       colorFor: (value, index) => {
+        const isCovered = covered[index] === 1;
         if (index >= flash.bootStart) {
-          return value === 0xff ? "#2d2417" : blendHex(memoryValueColor(value), "#b35b1e", 0.48);
+          if (!isCovered) {
+            return "#2d2417";
+          }
+          return value === 0xff
+            ? "#6d7068"
+            : blendHex(memoryValueColor(value), "#b35b1e", 0.48);
         }
-        return value === 0xff ? "#151a19" : flashByteColor(value, index);
+        if (!isCovered) {
+          return "#151a19";
+        }
+        return value === 0xff ? "#6d7973" : flashByteColor(value, index);
       },
       markers: [
         {
@@ -386,11 +396,11 @@ class BrowserUi {
     });
 
     document.getElementById("flashMapState").textContent =
-      `${flash.usedBytes}/${flash.totalBytes} B image`;
+      `${flash.coveredBytes}/${flash.totalBytes} B covered`;
     document.getElementById("flashMapRange").textContent =
       `${hex4(flash.start)}-${hex4(flash.end)}, app ${hex4(flash.appStart)}-${hex4(flash.appEnd)}, boot ${hex4(flash.bootStart)}-${hex4(flash.bootEnd)}`;
     document.getElementById("flashMapUsage").textContent =
-      `program span ${flash.usedBytes} B, non-0xff ${flash.nonFfBytes} B, app free ${flash.appFreeBytes} B`;
+      `covered ${flash.coveredBytes} B, non-0xff ${flash.nonFfBytes} B, covered 0xff ${flash.coveredFfBytes} B, app free ${flash.appFreeBytes} B`;
     document.getElementById("flashMapPc").textContent =
       `PC word ${snapshot.soc.core.pcHex}, byte ${flash.pcByteHex}`;
   }

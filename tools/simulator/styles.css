@@ -550,6 +550,10 @@ select {
   color: #6d7973;
 }
 
+.flash-covered-ff {
+  color: #8c9690;
+}
+
 .flash-used {
   color: #4b8ea1;
 }
