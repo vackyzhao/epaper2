@@ -51,6 +51,10 @@
 #define MQTT_RX_TOPIC "epaper2/rx"
 #endif
 
+#ifndef MQTT_COMMAND_SYNC_ENABLED
+#define MQTT_COMMAND_SYNC_ENABLED 1
+#endif
+
 #ifndef LOW_BATTERY_MV
 #define LOW_BATTERY_MV 3300
 #endif
@@ -67,6 +71,12 @@
 // resync OLD/NEW RAM and reduce ghosting.
 #ifndef EPD_PARTIALS_BEFORE_FULL
 #define EPD_PARTIALS_BEFORE_FULL 20
+#endif
+
+// 0 saves about 2 KB flash and avoids reading past the 128x128 bitmap when the
+// countdown panel needs a full 296x128 controller frame.
+#ifndef EPD_COUNTDOWN_BITMAP_ICON
+#define EPD_COUNTDOWN_BITMAP_ICON 0
 #endif
 
 // Current PCB: D4 drives a low-side N-MOS sampling switch; HIGH enables ADC divider.

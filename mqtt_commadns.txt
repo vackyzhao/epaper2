@@ -10,8 +10,19 @@ AT+MSUB="epaper2/cmd",1
 AT+MSUB="epaper2/rx",1
 AT+MPUB="epaper2/tx",1,0,"Happy"
 
-# epaper2/cmd date sync payload: YYMMDD,YYMMDD (exam,meet)
-# example payload: 251220,260101
+# epaper2/cmd payloads:
+# legacy date pair: YYMMDD,YYMMDD (exam,meet)
+# date=YYMMDD,YYMMDD
+# exam=YYMMDD
+# meet=YYMMDD
+# time=YYMMDDhhmmss
+# refresh=full
+# status
+#
+# examples:
+# 261225,260101
+# date=261225,260101
+# time=261225184958
 
 AT+MDISCONNECT
 AT+MIPCLOSE

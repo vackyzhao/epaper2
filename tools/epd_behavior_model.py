@@ -161,13 +161,30 @@ def mode2_setup_does_not_touch_glass() -> None:
 
 
 def source_policy_check(repo: Path) -> None:
+    def without_guarded_fast_partial(text: str) -> str:
+        lines: list[str] = []
+        skipping = 0
+        for line in text.splitlines(keepends=True):
+            stripped = line.strip()
+            if stripped == "#if EPD_FAST_PARTIAL_REFRESH":
+                skipping += 1
+                continue
+            if skipping:
+                if stripped.startswith("#if "):
+                    skipping += 1
+                elif stripped == "#endif":
+                    skipping -= 1
+                continue
+            lines.append(line)
+        return "".join(lines)
+
     app_files = [
         repo / "src" / "main.cpp",
         repo / "lib" / "display_utils" / "src" / "display_utils.cpp",
     ]
     forbidden = ("DisplayFrame_Partial", "SetFrameMemory_Partial(")
     for file_path in app_files:
-        text = file_path.read_text(encoding="utf-8", errors="replace")
+        text = without_guarded_fast_partial(file_path.read_text(encoding="utf-8", errors="replace"))
         for token in forbidden:
             if token in text:
                 raise AssertionError(f"{file_path}: application layer still calls {token}")

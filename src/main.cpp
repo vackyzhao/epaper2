@@ -31,12 +31,22 @@
 #define MESSAGE_LINE_CHARS 36
 #define MESSAGE_FIRST_LINE_Y 80
 #define MESSAGE_LINE_STEP_Y 16
+#define REMOTE_CMD_FLAG_DATE_CHANGED 0x01
+#define REMOTE_CMD_FLAG_RTC_CHANGED 0x02
+#define REMOTE_CMD_FLAG_FORCE_FULL_REFRESH 0x04
 
 enum MqttResult : int8_t
 {
   MQTT_RESULT_OK = 0,
   MQTT_RESULT_CONNECT_FAILED = -1,
   MQTT_RESULT_NO_MESSAGE = -2
+};
+
+enum RemoteCommandStatus : uint8_t
+{
+  REMOTE_CMD_NONE = 0,
+  REMOTE_CMD_OK = 1,
+  REMOTE_CMD_BAD = 2
 };
 
 RTC_DS3231 rtc;
@@ -61,6 +71,8 @@ const uint8_t TASK_MINUTE = 5;   // 固定在 xx:05
 // 上一次真正执行任务的“日 + 时”
 static uint8_t lastTaskDay = 0xFF;
 static int8_t lastTaskHour = -1;
+static uint8_t pendingRemoteCommandFlags = 0;
+static RemoteCommandStatus lastRemoteCommandStatus = REMOTE_CMD_NONE;
 
 #if EPD_FAST_PARTIAL_REFRESH
 static bool epdCountdownBaselineValid = false;
@@ -75,10 +87,17 @@ static void renderCurrentCountdown();
 static void invalidateCountdownBaseline();
 static bool tryFastCountdownRefresh();
 static bool parseDatePairPayload(const char *payload);
+static bool parseRemoteCommandPayload(const char *payload);
+static uint8_t consumeRemoteCommandFlags();
 static void setupWakePins();
+static void appendLiteral(char *&out, const char *value);
 static void appendUnsigned(char *&out, uint16_t value);
 static void appendSigned(char *&out, int16_t value);
+static void append2Digits(char *&out, uint8_t value);
+static void appendDateOnly(char *&out, const DateTime &dt);
+static void appendDateTime(char *&out, const DateTime &dt);
 static void formatStatusPayload(char *out, uint16_t voltage, int16_t freeRam);
+static void publishStatusPayload(uint16_t voltage);
 
 extern "C"
 {
@@ -120,12 +139,115 @@ static void appendSigned(char *&out, int16_t value)
   appendUnsigned(out, (uint16_t)value);
 }
 
+static void appendLiteral(char *&out, const char *value)
+{
+  while (*value)
+  {
+    *out++ = *value++;
+  }
+}
+
+static void append2Digits(char *&out, uint8_t value)
+{
+  *out++ = (char)('0' + value / 10);
+  *out++ = (char)('0' + value % 10);
+}
+
+static void appendDateOnly(char *&out, const DateTime &dt)
+{
+  const uint16_t year = dt.year();
+  *out++ = (char)('0' + (year / 1000) % 10);
+  *out++ = (char)('0' + (year / 100) % 10);
+  *out++ = (char)('0' + (year / 10) % 10);
+  *out++ = (char)('0' + year % 10);
+  *out++ = '-';
+  append2Digits(out, dt.month());
+  *out++ = '-';
+  append2Digits(out, dt.day());
+}
+
+static void appendDateTime(char *&out, const DateTime &dt)
+{
+  appendDateOnly(out, dt);
+  *out++ = 'T';
+  append2Digits(out, dt.hour());
+  *out++ = ':';
+  append2Digits(out, dt.minute());
+  *out++ = ':';
+  append2Digits(out, dt.second());
+}
+
+static const char *stateName()
+{
+  switch (currentState)
+  {
+  case STATE_EXAM_COUNTDOWN:
+    return "exam";
+  case STATE_MEET_COUNTDOWN:
+    return "meet";
+  case STATE_MQTT_SEND:
+    return "send";
+  case STATE_MQTT_MESSAGE:
+    return "rx";
+  case STATE_LOW_BATTERY:
+    return "lowbat";
+  }
+  return "unknown";
+}
+
+static const char *commandStatusName()
+{
+  switch (lastRemoteCommandStatus)
+  {
+  case REMOTE_CMD_OK:
+    return "ok";
+  case REMOTE_CMD_BAD:
+    return "bad";
+  case REMOTE_CMD_NONE:
+  default:
+    return "none";
+  }
+}
+
 static void formatStatusPayload(char *out, uint16_t voltage, int16_t freeRam)
 {
-  appendUnsigned(out, voltage);
-  *out++ = ',';
-  appendSigned(out, freeRam);
-  *out = '\0';
+  char *p = out;
+  DateTime meetDate;
+
+  appendLiteral(p, "v=");
+  appendUnsigned(p, voltage);
+  appendLiteral(p, ",ram=");
+  appendSigned(p, freeRam);
+  appendLiteral(p, ",state=");
+  appendLiteral(p, stateName());
+  appendLiteral(p, ",rtc=");
+  appendDateTime(p, rtc.now());
+  appendLiteral(p, ",exam=");
+  appendDateOnly(p, examDate);
+  appendLiteral(p, ",meet=");
+  if (eepromLoadTargetDate(EEPROM_DATE_MEET, meetDate))
+  {
+    appendDateOnly(p, meetDate);
+  }
+  else
+  {
+    appendLiteral(p, "unset");
+  }
+  appendLiteral(p, ",cmd=");
+  appendLiteral(p, commandStatusName());
+  *p = '\0';
+}
+
+static void publishStatusPayload(uint16_t voltage)
+{
+  memset(buf, 0, sizeof(buf));
+  formatStatusPayload(buf, voltage, free_ram_now());
+  Serial.print(F("AT+MPUB=\""));
+  Serial.print(F(MQTT_STATUS_TOPIC));
+  Serial.print(F("\",1,1,\""));
+  Serial.print(buf);
+  Serial.print(F("\"\r\n"));
+  Serial.flush();
 }
 
 static void reset()
@@ -162,6 +284,35 @@ static bool parseYymmdd(const char *s, DateTime &out)
   DateTime candidate(year, month, day, 0, 0, 0);
 
   out = candidate;
+  return true;
+}
+
+static bool parseYymmddhhmmss(const char *s, DateTime &out)
+{
+  if (!s || strlen(s) != 12)
+    return false;
+
+  for (uint8_t i = 0; i < 12; ++i)
+  {
+    if (s[i] < '0' || s[i] > '9')
+      return false;
+  }
+
+  char datePart[7];
+  memcpy(datePart, s, 6);
+  datePart[6] = '\0';
+
+  DateTime dateOnly;
+  if (!parseYymmdd(datePart, dateOnly))
+    return false;
+
+  const uint8_t hour = (s[6] - '0') * 10 + (s[7] - '0');
+  const uint8_t minute = (s[8] - '0') * 10 + (s[9] - '0');
+  const uint8_t second = (s[10] - '0') * 10 + (s[11] - '0');
+  if (hour > 23 || minute > 59 || second > 59)
+    return false;
+
+  out = DateTime(dateOnly.year(), dateOnly.month(), dateOnly.day(), hour, minute, second);
   return true;
 }
 
@@ -206,6 +357,144 @@ static bool parseDatePairPayload(const char *payload)
   return true;
 }
 
+static bool startsWithToken(const char *s, const char *prefix)
+{
+  while (*prefix)
+  {
+    if (*s++ != *prefix++)
+      return false;
+  }
+  return true;
+}
+
+static bool parseRemoteCommandPayload(const char *payload)
+{
+  char tmp[48];
+  size_t n = 0;
+
+  while (payload && payload[n] && payload[n] != '\r' && payload[n] != '\n' && n < sizeof(tmp) - 1)
+  {
+    tmp[n] = payload[n];
+    ++n;
+  }
+  tmp[n] = '\0';
+
+  char *cmd = trimToken(tmp);
+  if (*cmd == '\0')
+    return false;
+
+  // Backward compatible payload: YYMMDD,YYMMDD.
+  if (parseDatePairPayload(cmd))
+  {
+    pendingRemoteCommandFlags |= REMOTE_CMD_FLAG_DATE_CHANGED | REMOTE_CMD_FLAG_FORCE_FULL_REFRESH;
+    return true;
+  }
+
+  if (startsWithToken(cmd, "date="))
+  {
+    if (!parseDatePairPayload(cmd + 5))
+      return false;
+    pendingRemoteCommandFlags |= REMOTE_CMD_FLAG_DATE_CHANGED | REMOTE_CMD_FLAG_FORCE_FULL_REFRESH;
+    return true;
+  }
+
+  if (startsWithToken(cmd, "exam="))
+  {
+    DateTime newExam;
+    if (!parseYymmdd(trimToken(cmd + 5), newExam))
+      return false;
+    examDate = newExam;
+    eepromSaveTargetDate(EEPROM_DATE_EXAM, newExam);
+    pendingRemoteCommandFlags |= REMOTE_CMD_FLAG_DATE_CHANGED | REMOTE_CMD_FLAG_FORCE_FULL_REFRESH;
+    return true;
+  }
+
+  if (startsWithToken(cmd, "meet="))
+  {
+    DateTime newMeet;
+    if (!parseYymmdd(trimToken(cmd + 5), newMeet))
+      return false;
+    eepromSaveTargetDate(EEPROM_DATE_MEET, newMeet);
+    pendingRemoteCommandFlags |= REMOTE_CMD_FLAG_DATE_CHANGED | REMOTE_CMD_FLAG_FORCE_FULL_REFRESH;
+    return true;
+  }
+
+  if (startsWithToken(cmd, "time="))
+  {
+    DateTime newTime;
+    if (!parseYymmddhhmmss(trimToken(cmd + 5), newTime))
+      return false;
+    rtc.adjust(newTime);
+    pendingRemoteCommandFlags |= REMOTE_CMD_FLAG_RTC_CHANGED | REMOTE_CMD_FLAG_FORCE_FULL_REFRESH;
+    return true;
+  }
+
+  if (strcmp(cmd, "refresh=full") == 0 || strcmp(cmd, "full") == 0)
+  {
+    pendingRemoteCommandFlags |= REMOTE_CMD_FLAG_FORCE_FULL_REFRESH;
+    return true;
+  }
+
+  if (strcmp(cmd, "status") == 0 || strcmp(cmd, "?") == 0)
+  {
+    return true;
+  }
+
+  return false;
+}
+
+static uint8_t consumeRemoteCommandFlags()
+{
+  const uint8_t flags = pendingRemoteCommandFlags;
+  pendingRemoteCommandFlags = 0;
+  return flags;
+}
+
+static void serialDrain(uint8_t perByteDelayMs) __attribute__((noinline));
+static void serialDrain(uint8_t perByteDelayMs)
+{
+  while (Serial.available())
+  {
+    (void)Serial.read();
+    if (perByteDelayMs)
+      delay(perByteDelayMs);
+  }
+}
+
+static bool serialWaitFor(PGM_P ok1, PGM_P ok2, PGM_P stop1, PGM_P stop2, uint32_t timeoutMs) __attribute__((noinline));
+static bool serialWaitFor(PGM_P ok1, PGM_P ok2, PGM_P stop1, PGM_P stop2, uint32_t timeoutMs)
+{
+  uint8_t idx = 0;
+  uint32_t start = millis();
+  memset(buf, 0, sizeof(buf));
+
+  while (millis() - start < timeoutMs)
+  {
+    if (!Serial.available())
+      continue;
+
+    char c = (char)Serial.read();
+    if (idx < sizeof(buf) - 1)
+    {
+      buf[idx++] = c;
+      buf[idx] = '\0';
+    }
+
+    if ((ok1 && strstr_P(buf, ok1)) || (ok2 && strstr_P(buf, ok2)))
+      return true;
+    if ((stop1 && strstr_P(buf, stop1)) || (stop2 && strstr_P(buf, stop2)))
+      return false;
+
+    if (c == '\n')
+    {
+      idx = 0;
+      buf[0] = '\0';
+    }
+  }
+
+  return false;
+}
+
 static MqttResult checkMessages_debug(uint8_t mode)
 {
   MqttResult result = MQTT_RESULT_OK;
@@ -219,84 +508,16 @@ static MqttResult checkMessages_debug(uint8_t mode)
   delay(10);
   digitalWrite(PMOS_CTRL_PIN, LOW); // 打开电源
 
-  t2 = millis();
-  idx2 = 0;
-  memset(buf, 0, sizeof(buf));
-
-  while (millis() - t2 < 10000)
-  {
-    if (Serial.available())
-    {
-      char c = (char)Serial.read();
-      if (idx2 < sizeof(buf) - 1)
-      {
-        buf[idx2++] = c;
-        buf[idx2] = '\0';
-      }
-
-      if (c == '\n') // 一行接收完毕
-      {
-        // 去掉行尾 \r\n
-        while (idx2 > 0 && (buf[idx2 - 1] == '\r' || buf[idx2 - 1] == '\n'))
-        {
-          buf[--idx2] = '\0';
-        }
-
-        if (strstr_P(buf, PSTR("+CGEV: ME PDN ACT 1")))
-        {
-          // PDP 激活成功
-          break;
-        }
-
-        // 处理完这一行 → 清空准备接收下一行
-        idx2 = 0;
-        buf[0] = '\0';
-      }
-    }
-  }
+  (void)serialWaitFor(PSTR("+CGEV: ME PDN ACT 1"), NULL, NULL, NULL, 10000);
   delay(500);
-  while (Serial.available() > 0)
-  {
-    (void)Serial.read(); // 读走并丢弃
-    delay(5);
-  }
+  serialDrain(5);
 
   for (uint8_t i = 0; i < 10; i++)
   {
     Serial.println(F("AT+CEREG?"));
     Serial.flush();
 
-    t2 = millis();
-    idx2 = 0;
-    memset(buf, 0, sizeof(buf));
-
-    while (millis() - t2 < 10000)
-    {
-      if (Serial.available())
-      {
-        char c = (char)Serial.read();
-        if (idx2 < sizeof(buf) - 1)
-        {
-          buf[idx2++] = c;
-          buf[idx2] = '\0';
-        }
-
-        if (strstr_P(buf, PSTR("+CEREG: 0,1")) || strstr_P(buf, PSTR("+CEREG: 0,5")))
-        {
-          registered = true;
-          break; // 注册成功
-        }
-        if (strstr_P(buf, PSTR("+CEREG: 0,2")))
-        {
-          break;
-        }
-        if (c == '\n') // 到行尾，清空缓冲
-        {
-          idx2 = 0;
-          buf[0] = '\0';
-        }
-      }
-    }
+    registered = serialWaitFor(PSTR("+CEREG: 0,1"), PSTR("+CEREG: 0,5"), PSTR("+CEREG: 0,2"), NULL, 10000);
 
     if (registered)
       break;     // 成功就直接跳出整个 for
@@ -315,42 +536,13 @@ static MqttResult checkMessages_debug(uint8_t mode)
   for (uint8_t i = 0; i < 5; i++)
   {
     // 清空串口缓冲和 buf
-    while (Serial.available())
-    {
-      (void)Serial.read();
-    }
-    idx2 = 0;
-    memset(buf, 0, sizeof(buf));
+    serialDrain(0);
 
     Serial.println(F("AT+CGATT?"));
     Serial.flush();
 
     delay(100);
-    t2 = millis();
-    while (millis() - t2 < 10000)
-    {
-      if (Serial.available())
-      {
-        char c = (char)Serial.read();
-        if (idx2 < sizeof(buf) - 1)
-        {
-          buf[idx2++] = c;
-          buf[idx2] = '\0';
-        }
-
-        if (strstr_P(buf, PSTR("+CGATT: 1")))
-        {
-          attached = true;
-          break; // 注册成功
-        }
-
-        if (c == '\n') // 到行尾，清空缓冲
-        {
-          idx2 = 0;
-          buf[0] = '\0';
-        }
-      }
-    }
+    attached = serialWaitFor(PSTR("+CGATT: 1"), NULL, NULL, NULL, 10000);
 
     if (attached)
       break;     // 成功就直接跳出整个 for
@@ -460,12 +652,7 @@ static MqttResult checkMessages_debug(uint8_t mode)
   for (uint8_t i = 0; i < 10; i++)
   {
     // 清空串口缓冲和 buf
-    while (Serial.available())
-    {
-      (void)Serial.read();
-    }
-    idx2 = 0;
-    memset(buf, 0, sizeof(buf));
+    serialDrain(0);
 
     Serial.print(F("AT+MIPSTART=\""));
     Serial.print(F(MQTT_BROKER));
@@ -473,36 +660,8 @@ static MqttResult checkMessages_debug(uint8_t mode)
     Serial.println(MQTT_PORT);
     Serial.flush();
     delay(100);
-    t2 = millis();
-    while (millis() - t2 < 10000)
-    {
-      if (Serial.available())
-      {
-        char c = (char)Serial.read();
-        if (idx2 < sizeof(buf) - 1)
-        {
-          buf[idx2++] = c;
-          buf[idx2] = '\0';
-        }
+    tcp_ok = serialWaitFor(PSTR("CONNECT OK"), PSTR("ALREADY CONNECT"), PSTR("CONNECT FAIL"), PSTR("ERROR"), 10000);
 
-        if (strstr_P(buf, PSTR("CONNECT OK")) || strstr_P(buf, PSTR("ALREADY CONNECT")))
-        {
-          tcp_ok = true;
-          break; // TCP 连接成功，跳出 while 和 for
-        }
-
-        if (strstr_P(buf, PSTR("CONNECT FAIL")) || strstr_P(buf, PSTR("ERROR")))
-        {
-          break; // 本次失败，跳出 while 重新尝试
-        }
-
-        if (c == '\n') // 行结束，重置缓冲
-        {
-          idx2 = 0;
-          buf[0] = '\0';
-        }
-      }
-    }
     if (tcp_ok)
       break;     // 成功就直接跳出整个 for
     delay(1500); // 每次重试之间等一秒
@@ -517,12 +676,7 @@ static MqttResult checkMessages_debug(uint8_t mode)
   for (uint8_t i = 0; i < 5; i++)
   {
     // 清空串口缓冲和 buf
-    while (Serial.available())
-    {
-      (void)Serial.read();
-    }
-    idx2 = 0;
-    memset(buf, 0, sizeof(buf));
+    serialDrain(0);
 
     Serial.print(F("AT+MCONNECT="));
     Serial.print(MQTT_CLEAN_SESSION);
@@ -530,36 +684,8 @@ static MqttResult checkMessages_debug(uint8_t mode)
     Serial.println(MQTT_KEEPALIVE_SEC);
     Serial.flush();
     delay(100);
-    t2 = millis();
-    while (millis() - t2 < 10000)
-    {
-      if (Serial.available())
-      {
-        char c = (char)Serial.read();
-        if (idx2 < sizeof(buf) - 1)
-        {
-          buf[idx2++] = c;
-          buf[idx2] = '\0';
-        }
+    mqtt_ok = serialWaitFor(PSTR("CONNACK OK"), NULL, PSTR("ERROR"), NULL, 10000);
 
-        if (strstr_P(buf, PSTR("CONNACK OK")))
-        {
-          mqtt_ok = true;
-          break; // MQTT 连接成功，跳出 while 和 for
-        }
-
-        if (strstr_P(buf, PSTR("ERROR")))
-        {
-          break; // 本次失败，跳出 while 重新尝试
-        }
-
-        if (c == '\n') // 行结束，重置缓冲
-        {
-          idx2 = 0;
-          buf[0] = '\0';
-        }
-      }
-    }
     if (mqtt_ok)
       break;     // 成功就直接跳出整个 for
     delay(1000); // 每次重试之间等一秒
@@ -576,15 +702,8 @@ static MqttResult checkMessages_debug(uint8_t mode)
   Serial.println(F("AT+MQTTMSGSET=0"));
   Serial.flush();
   delay(500);
-  // 拼接到 payload 后面
-  memset(buf, 0, sizeof(buf));
-  formatStatusPayload(buf, voltage, free_ram_now());
-  Serial.print(F("AT+MPUB=\""));
-  Serial.print(F(MQTT_STATUS_TOPIC));
-  Serial.print(F("\",1,1,\""));
-  Serial.print(buf);
-  Serial.print(F("\"\r\n"));
-  Serial.flush();
+  lastRemoteCommandStatus = REMOTE_CMD_NONE;
+  publishStatusPayload(voltage);
 
   delay(2000);
 
@@ -634,10 +753,13 @@ static MqttResult checkMessages_debug(uint8_t mode)
             while (*p == ' ')
               ++p; // 去掉空格
 
-            (void)parseDatePairPayload(p);
+            lastRemoteCommandStatus = parseRemoteCommandPayload(p) ? REMOTE_CMD_OK : REMOTE_CMD_BAD;
+            publishStatusPayload(voltage);
           }
           else
           {
+            lastRemoteCommandStatus = REMOTE_CMD_BAD;
+            publishStatusPayload(voltage);
           }
           Serial.flush();
           break; // 处理完这行就退出
@@ -1157,6 +1279,7 @@ void handleRtcAlarmEvent()
   digitalWrite(PMOS_CTRL_PIN, HIGH); // 关闭电源
   rtc.clearAlarm(1);                 // 清除 DS3231 的闹钟中断标志
   DateTime now = rtc.now() + TimeSpan(0, 0, 1, 0);
+  uint8_t remoteFlags = 0;
 
   // 检查是否跨天
   if (now.day() != lastDay)
@@ -1176,7 +1299,27 @@ void handleRtcAlarmEvent()
   {
     lastTaskDay = now.day();
     lastTaskHour = now.hour();
-    // checkMessages();
+#if MQTT_COMMAND_SYNC_ENABLED
+    (void)checkMessages_debug(MODE_INIT_SYNC);
+    remoteFlags = consumeRemoteCommandFlags();
+#endif
+  }
+
+  if (remoteFlags & (REMOTE_CMD_FLAG_DATE_CHANGED | REMOTE_CMD_FLAG_RTC_CHANGED | REMOTE_CMD_FLAG_FORCE_FULL_REFRESH))
+  {
+    if (remoteFlags & REMOTE_CMD_FLAG_RTC_CHANGED)
+    {
+      now = rtc.now() + TimeSpan(0, 0, 1, 0);
+      lastDay = now.day();
+    }
+
+    invalidateCountdownBaseline();
+    if (currentState == STATE_EXAM_COUNTDOWN || currentState == STATE_MEET_COUNTDOWN)
+    {
+      renderCurrentCountdown();
+    }
+    setupNextAlarm();
+    return;
   }
 
   switch (currentState)
@@ -1321,8 +1464,9 @@ void setup()
     examDate = savedExam;
   }
 
-  delay(30000);              // 等待电容充电
+  delay(30000);                       // 等待电容充电
   checkMessages_debug(MODE_INIT_SYNC); // 获取初始化日期参数
+  (void)consumeRemoteCommandFlags();
 
   // 禁用DS3231方波，启用中断模式
   rtc.writeSqwPinMode(DS3231_OFF);

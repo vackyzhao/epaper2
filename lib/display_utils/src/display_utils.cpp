@@ -57,8 +57,12 @@ void initCountdownPanel(int status) {
   int tens = (days_left / 10) % 10;
   int units = days_left % 10;
 
+#if EPD_COUNTDOWN_BITMAP_ICON
   epd.SetFrameMemory_Base(IMAGE_DATA_ICON);
   epd.SetFrameMemory_WhiteBase(0, 128, 128, 168);
+#else
+  epd.ClearFrameMemory(0xFF);
+#endif
 
   char dateBuf[11];
   formatDate(dateBuf, now);
