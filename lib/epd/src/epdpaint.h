@@ -55,8 +55,11 @@ public:
     void DrawPixel(int x, int y, int colored);
     void DrawCharAt(int x, int y, char ascii_char, sFONT* font, int colored);
     void DrawCharFromZeroAt(int x, int y, char ascii_char, sFONT* font, int colored);
+    void DrawCharAtScaled(int x, int y, char ascii_char, sFONT* font, uint8_t scale_x, uint8_t scale_y, int colored);
     void DrawStringAt(int x, int y, const char* text, sFONT* font, int colored);
     void DrawStringAt_P(int x, int y, PGM_P text, sFONT* font, int colored);
+    void DrawStringAtScaled(int x, int y, const char* text, sFONT* font, uint8_t scale_x, uint8_t scale_y, int colored);
+    void DrawStringAtScaled_P(int x, int y, PGM_P text, sFONT* font, uint8_t scale_x, uint8_t scale_y, int colored);
     void DrawLine(int x0, int y0, int x1, int y1, int colored);
     void DrawHorizontalLine(int x, int y, int width, int colored);
     void DrawVerticalLine(int x, int y, int height, int colored);

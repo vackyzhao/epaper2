@@ -67,22 +67,22 @@ void initCountdownPanel(int status) {
   char dateBuf[11];
   formatDate(dateBuf, now);
 
-  paint.SetWidth(14);
+  paint.SetWidth(24);
   paint.SetHeight(148);
   paint.SetRotate(ROTATE_90);
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 1, dateBuf, &Font20, COLORED);
+  paint.DrawStringAtScaled(0, 0, dateBuf, &Font12, 2, 2, COLORED);
   epd.SetFrameMemory_Base(paint.GetImage(), 110, 140, paint.GetWidth(), paint.GetHeight());
 
   paint.SetWidth(64);
-  paint.SetHeight(33);
+  paint.SetHeight(32);
   paint.SetRotate(ROTATE_90);
   const uint8_t pos[] = {196, 163, 130};
   const uint8_t dig[] = {(uint8_t)units, (uint8_t)tens, (uint8_t)hundreds};
 
   for (int i = 0; i < 3; i++) {
     paint.Clear(UNCOLORED);
-    paint.DrawCharFromZeroAt(0, 0, dig[i], &Font36, COLORED);
+    paint.DrawCharAtScaled(2, 2, (char)('0' + dig[i]), &Font12, 4, 5, COLORED);
     epd.SetFrameMemory_Base(paint.GetImage(), 1, pos[i], paint.GetWidth(), paint.GetHeight());
   }
 
@@ -90,24 +90,24 @@ void initCountdownPanel(int status) {
   paint.SetHeight(80);
   paint.SetRotate(ROTATE_90);
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt_P(0, 0, days_left == 1 ? PSTR("DAY") : PSTR("DAYS"), &Font20, COLORED);
+  paint.DrawStringAtScaled_P(0, 0, days_left == 1 ? PSTR("DAY") : PSTR("DAYS"), &Font12, 2, 1, COLORED);
   epd.SetFrameMemory_Base(paint.GetImage(), 45, 230, paint.GetWidth(), paint.GetHeight());
 
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt_P(0, 0, status == COUNTDOWN_EXAM ? PSTR("TO") : PSTR("MEET"), &Font20, COLORED);
+  paint.DrawStringAtScaled_P(0, 0, status == COUNTDOWN_EXAM ? PSTR("TO") : PSTR("MEET"), &Font12, 2, 1, COLORED);
   epd.SetFrameMemory_Base(paint.GetImage(), 30, 230, paint.GetWidth(), paint.GetHeight());
 
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt_P(0, 0, status == COUNTDOWN_EXAM ? PSTR("EXAM") : PSTR("ZCQ"), &Font20, COLORED);
+  paint.DrawStringAtScaled_P(0, 0, status == COUNTDOWN_EXAM ? PSTR("EXAM") : PSTR("ZCQ"), &Font12, 2, 1, COLORED);
   epd.SetFrameMemory_Base(paint.GetImage(), 10, 230, paint.GetWidth(), paint.GetHeight());
 
   char timeBuf[6];
   formatTime(timeBuf, now);
-  paint.SetWidth(32);
+  paint.SetWidth(24);
   paint.SetHeight(96);
   paint.SetRotate(ROTATE_90);
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 4, timeBuf, &Font20, COLORED);
+  paint.DrawStringAtScaled(0, 0, timeBuf, &Font12, 2, 2, COLORED);
   epd.SetFrameMemory_Base(paint.GetImage(), 64, 168, paint.GetWidth(), paint.GetHeight());
 }
 
@@ -118,11 +118,11 @@ void updateCountdownTimePartial()
   char timeBuf[6];
   formatTime(timeBuf, now);
 
-  paint.SetWidth(32);
+  paint.SetWidth(24);
   paint.SetHeight(96);
   paint.SetRotate(ROTATE_90);
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt(0, 4, timeBuf, &Font20, COLORED);
+  paint.DrawStringAtScaled(0, 0, timeBuf, &Font12, 2, 2, COLORED);
   epd.SetFrameMemory_Partial(paint.GetImage(), 64, 168, paint.GetWidth(), paint.GetHeight());
   epd.DisplayFrame_Partial();
 }

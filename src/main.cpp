@@ -1038,7 +1038,7 @@ bool mqtt_send(void)
   paint.SetHeight(256);
   paint.SetRotate(ROTATE_90);
   paint.Clear(UNCOLORED);
-  paint.DrawStringAt_P(0, 0, PSTR("v"), &Font20, COLORED);
+  paint.DrawStringAt_P(0, 0, PSTR("v"), &Font12, COLORED);
   epd.SetFrameMemory_Base(paint.GetImage(), 0, 55, paint.GetWidth(), paint.GetHeight());
   epd.SetFrameMemory_Base(paint.GetImage(), 0, 115, paint.GetWidth(), paint.GetHeight());
   epd.SetFrameMemory_Base(paint.GetImage(), 0, 170, paint.GetWidth(), paint.GetHeight());

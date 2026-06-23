@@ -182,6 +182,34 @@ void Paint::DrawCharFromZeroAt(int x, int y, char ascii_char, sFONT* font, int c
         }
     }
 }
+
+void Paint::DrawCharAtScaled(int x, int y, char ascii_char, sFONT* font, uint8_t scale_x, uint8_t scale_y, int colored) {
+    if (scale_x == 0) {
+        scale_x = 1;
+    }
+    if (scale_y == 0) {
+        scale_y = 1;
+    }
+
+    const unsigned int bytes_per_row = font->Width / 8 + (font->Width % 8 ? 1 : 0);
+    const unsigned int char_offset = (ascii_char - ' ') * font->Height * bytes_per_row;
+    const unsigned char* ptr = &font->table[char_offset];
+
+    for (unsigned int j = 0; j < font->Height; j++) {
+        const unsigned char* row = ptr + j * bytes_per_row;
+        for (unsigned int i = 0; i < font->Width; i++) {
+            if (pgm_read_byte(row + i / 8) & (0x80 >> (i % 8))) {
+                const int px = x + i * scale_x;
+                const int py = y + j * scale_y;
+                for (uint8_t yy = 0; yy < scale_y; yy++) {
+                    for (uint8_t xx = 0; xx < scale_x; xx++) {
+                        DrawPixel(px + xx, py + yy, colored);
+                    }
+                }
+            }
+        }
+    }
+}
 /**
 *  @brief: this displays a string on the frame buffer but not refresh
 */
@@ -209,6 +237,27 @@ void Paint::DrawStringAt_P(int x, int y, PGM_P text, sFONT* font, int colored) {
     while ((c = (char)pgm_read_byte(text++)) != '\0') {
         DrawCharAt(refcolumn, y, c, font, colored);
         refcolumn += font->Width;
+    }
+}
+
+void Paint::DrawStringAtScaled(int x, int y, const char* text, sFONT* font, uint8_t scale_x, uint8_t scale_y, int colored) {
+    const char* p_text = text;
+    int refcolumn = x;
+
+    while (*p_text != 0) {
+        DrawCharAtScaled(refcolumn, y, *p_text, font, scale_x, scale_y, colored);
+        refcolumn += font->Width * scale_x;
+        p_text++;
+    }
+}
+
+void Paint::DrawStringAtScaled_P(int x, int y, PGM_P text, sFONT* font, uint8_t scale_x, uint8_t scale_y, int colored) {
+    int refcolumn = x;
+    char c;
+
+    while ((c = (char)pgm_read_byte(text++)) != '\0') {
+        DrawCharAtScaled(refcolumn, y, c, font, scale_x, scale_y, colored);
+        refcolumn += font->Width * scale_x;
     }
 }
 
