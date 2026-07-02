@@ -1,6 +1,21 @@
 "use strict";
 
 const LOW_BATTERY_MV = 3300;
+const EPD_FRAME_BYTES = 4736;
+const FEATURE_DEFAULTS = {
+  ui: { items: 4, payloadKb: 0, storage: "flash" },
+  vocab: { items: 80, payloadKb: 6, storage: "hybrid" },
+  image: { items: 3, payloadKb: 4.6, storage: "flash" },
+  ota: { items: 1, payloadKb: 22, storage: "mqtt" },
+  combo: { items: 60, payloadKb: 14, storage: "hybrid" },
+};
+const FEATURE_LABELS = {
+  ui: "多页面 UI",
+  vocab: "背单词卡片",
+  image: "图片槽切换",
+  ota: "Air780 OTA",
+  combo: "UI + 背单词 + 图片",
+};
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -56,6 +71,7 @@ class BrowserUi {
     this.memoryMapCtx = document.getElementById("memoryMapCanvas").getContext("2d");
     this.flashMapCtx = document.getElementById("flashMapCanvas").getContext("2d");
     this.eepromMapCtx = document.getElementById("eepromMapCanvas").getContext("2d");
+    this.featurePreviewCtx = document.getElementById("featurePreviewCanvas").getContext("2d");
     this.powerScopeCtx = document.getElementById("powerScope").getContext("2d");
     this.powerSamples = [];
     this.lastPowerSampleS = -Infinity;
@@ -95,6 +111,16 @@ class BrowserUi {
       this.sim.setSpeed(event.target.value);
     });
     document.getElementById("panelSelect").addEventListener("change", () => this.updatePanelWarning());
+    document.getElementById("featureSelect").addEventListener("change", () => {
+      this.applyFeatureDefaults();
+      this.updateFeatureLab(this.lastSnapshot);
+    });
+    for (const id of ["featureItems", "featurePayloadKb", "featureStorage"]) {
+      document.getElementById(id).addEventListener("input", () => this.updateFeatureLab(this.lastSnapshot));
+    }
+    document.getElementById("featureApplyBtn").addEventListener("click", () => {
+      this.updateFeatureLab(this.sim.snapshot());
+    });
     for (const id of [
       "batteryMv",
       "batteryCount",
@@ -234,6 +260,7 @@ class BrowserUi {
       `firmware EEPROM backend active, cycles ${snapshot.cycles}`;
     document.getElementById("firmwareGeometry").textContent = "firmware.hex -> EPD 128x296, 4736 bytes";
     this.updateSocPanel(snapshot);
+    this.updateFeatureLab(snapshot);
     document.getElementById("sampleSwitchState").textContent =
       snapshot.power.batSwitchOn ? "N-MOS on, D4 HIGH -> ADC sample" : "N-MOS off, D4 LOW";
     document.getElementById("airState").textContent =
@@ -292,6 +319,322 @@ class BrowserUi {
       : `off, WDTCSR ${hex2(wdt.wdtcsr)}, MCUSR ${hex2(wdt.mcusr)}`;
     document.getElementById("socTimerState").textContent =
       `T0 ${timerLine(timers.t0)} / T1 ${timerLine(timers.t1)} / T2 ${timerLine(timers.t2)}`;
+  }
+
+  applyFeatureDefaults() {
+    const kind = document.getElementById("featureSelect").value;
+    const defaults = FEATURE_DEFAULTS[kind] ?? FEATURE_DEFAULTS.ui;
+    document.getElementById("featureItems").value = defaults.items;
+    document.getElementById("featurePayloadKb").value = defaults.payloadKb;
+    document.getElementById("featureStorage").value = defaults.storage;
+  }
+
+  featureLabValues() {
+    const kind = document.getElementById("featureSelect").value;
+    const defaults = FEATURE_DEFAULTS[kind] ?? FEATURE_DEFAULTS.ui;
+    const payloadKb = clampNumber(Number(document.getElementById("featurePayloadKb").value), 0, 64, defaults.payloadKb);
+    return {
+      kind,
+      label: FEATURE_LABELS[kind] ?? FEATURE_LABELS.ui,
+      items: Math.round(clampNumber(Number(document.getElementById("featureItems").value), 1, 600, defaults.items)),
+      payloadKb,
+      payloadBytes: Math.round(payloadKb * 1024),
+      storage: document.getElementById("featureStorage").value,
+    };
+  }
+
+  updateFeatureLab(snapshot = null) {
+    const values = this.featureLabValues();
+    const estimate = this.estimateFeature(values, snapshot);
+    const verdict = document.getElementById("featureVerdict");
+    verdict.textContent = estimate.verdict;
+    verdict.classList.toggle("bad", estimate.severity === "bad");
+    verdict.classList.toggle("warn", estimate.severity === "warn");
+    document.getElementById("featureFlashCost").textContent = estimate.flashLine;
+    document.getElementById("featureRamCost").textContent = estimate.ramLine;
+    document.getElementById("featureEepromCost").textContent = estimate.eepromLine;
+    document.getElementById("featureNetworkCost").textContent = estimate.networkLine;
+    document.getElementById("featureRefreshCost").textContent = estimate.refreshLine;
+    document.getElementById("featureEnergyCost").textContent = estimate.energyLine;
+    document.getElementById("featureNotes").textContent = estimate.notes.join(" / ");
+    this.renderFeaturePreview(values, estimate);
+  }
+
+  estimateFeature(values, snapshot) {
+    const flash = snapshot?.soc?.flash;
+    const mem = snapshot?.soc?.memory;
+    const eeprom = snapshot?.soc?.eeprom;
+    const flashFree = flash?.appFreeBytes ?? 0;
+    const ramFree = mem?.stackFreeBytes ?? 0;
+    const eepromFree = eeprom?.erasedBytes ?? eeprom?.totalBytes ?? 0;
+    const powerValues = this.powerControlValues();
+    const power = snapshot?.power ?? {
+      v3v3Mv: Math.min(3300, powerValues.mv),
+      airBrownout: false,
+      airWarn: false,
+    };
+    const model = this.featureCostModel(values);
+    const totalFlashBytes = model.codeBytes + model.dataFlashBytes;
+    const networkSeconds = model.networkBytes > 0
+      ? model.attachSeconds + (model.networkBytes * 10) / model.uartBps + model.chunks * 0.12
+      : 0;
+    const txPulses = model.networkBytes > 0 ? Math.max(4, model.chunks * 2) : 0;
+    const radioChargeMc = model.networkBytes > 0
+      ? powerValues.sustain * networkSeconds + powerValues.pulse * (powerValues.pulseWidth / 1000) * txPulses
+      : 0;
+    const epdCurrentMa = model.refreshKind === "full" ? 16 : model.refreshMs > 0 ? 8 : 0;
+    const epdChargeMc = epdCurrentMa * (model.refreshMs / 1000);
+    const activeSeconds = Math.min(3, networkSeconds) + model.refreshMs / 1000 + model.cpuMs / 1000;
+    const avrChargeMc = powerValues.avrActiveMa * activeSeconds;
+    const totalChargeMc = radioChargeMc + epdChargeMc + avrChargeMc;
+    const energyMj = totalChargeMc * ((power.v3v3Mv ?? 3300) / 1000);
+    const notes = [...model.notes];
+    let severity = "ok";
+    let verdict = "AVR 可落地";
+
+    if (!snapshot?.soc) {
+      severity = "warn";
+      verdict = "waiting for firmware";
+      notes.unshift("等待固件快照后才能按真实余量判断");
+    } else {
+      const flashMargin = flashFree - totalFlashBytes;
+      const ramMargin = ramFree - model.ramBytes;
+      const eepromMargin = eepromFree - model.eepromBytes;
+      if (flashMargin < 0) {
+        severity = "bad";
+        verdict = `Flash 超 ${formatBytes(-flashMargin)}`;
+        notes.unshift("需要继续压缩代码/字体/字符串，或把数据移到 LTE 侧按需拉取");
+      } else if (flashMargin < 1024) {
+        severity = "warn";
+        verdict = `Flash 余 ${formatBytes(flashMargin)}`;
+        notes.unshift("固件仍能放下，但没有足够回滚余量");
+      }
+      if (eepromMargin < 0) {
+        severity = "bad";
+        verdict = `EEPROM 超 ${formatBytes(-eepromMargin)}`;
+        notes.unshift("EEPROM 只能放状态/索引，不适合放图片或大词库");
+      } else if (severity === "ok" && eepromMargin < 96) {
+        severity = "warn";
+        verdict = `EEPROM 余 ${formatBytes(eepromMargin)}`;
+      }
+      if (ramFree > 0 && ramMargin < 384) {
+        severity = severity === "bad" ? "bad" : "warn";
+        verdict = ramMargin < 0 ? `SRAM 超 ${formatBytes(-ramMargin)}` : `SRAM 栈余 ${formatBytes(ramMargin)}`;
+        notes.unshift("运行期要避免大缓冲，优先逐字节渲染和窗口刷新");
+      }
+      if (values.kind === "ota") {
+        severity = severity === "bad" ? "bad" : "warn";
+        verdict = "固件 OTA 需暂存";
+        notes.unshift("当前模型只建议 OTA-lite：远程配置/词库/图片；全量固件需要 SPM bootloader 和外部暂存");
+      }
+      if (model.networkBytes > 0 && (power.airBrownout || power.airWarn)) {
+        severity = "bad";
+        verdict = "LTE 电源风险";
+        notes.unshift("当前电源模型下网络更新会碰到 VLTE 风险，先增大电容或降低脉冲");
+      }
+    }
+
+    return {
+      ...model,
+      severity,
+      verdict,
+      notes,
+      totalFlashBytes,
+      networkSeconds,
+      txPulses,
+      totalChargeMc,
+      flashLine: snapshot?.soc
+        ? `${formatBytes(totalFlashBytes)} / free ${formatBytes(flashFree)} (${formatBytes(model.codeBytes)} code + ${formatBytes(model.dataFlashBytes)} data)`
+        : `${formatBytes(totalFlashBytes)} estimated`,
+      ramLine: snapshot?.soc
+        ? `${formatBytes(model.ramBytes)} transient / stack free ${formatBytes(ramFree)}`
+        : `${formatBytes(model.ramBytes)} transient`,
+      eepromLine: snapshot?.soc
+        ? `${formatBytes(model.eepromBytes)} / free ${formatBytes(eepromFree)}`
+        : `${formatBytes(model.eepromBytes)} estimated`,
+      networkLine: model.networkBytes > 0
+        ? `${formatBytes(model.networkBytes)}, ${networkSeconds.toFixed(1)} s, ${txPulses} LTE burst pulses`
+        : "none",
+      refreshLine: model.refreshMs > 0
+        ? `${model.refreshName}, ${formatBytes(model.refreshBytes)} window, ${model.refreshMs.toFixed(0)} ms`
+        : "none",
+      energyLine: `${totalChargeMc.toFixed(1)} mC, ${(totalChargeMc / 3600).toFixed(5)} mAh, ${energyMj.toFixed(1)} mJ`,
+    };
+  }
+
+  featureCostModel(values) {
+    const storage = values.storage;
+    const items = values.items;
+    const payloadBytes = values.payloadBytes;
+    const chunks = Math.ceil(Math.max(payloadBytes, 0) / 384);
+    const attachSeconds = this.lastSnapshot?.air?.mqttConnected ? 1.2 : 10.5;
+    const common = {
+      codeBytes: 0,
+      dataFlashBytes: 0,
+      ramBytes: 0,
+      eepromBytes: 0,
+      networkBytes: 0,
+      refreshBytes: 0,
+      refreshMs: 0,
+      refreshKind: "none",
+      refreshName: "no EPD refresh",
+      cpuMs: 0,
+      chunks,
+      attachSeconds,
+      uartBps: 9600,
+      notes: [],
+    };
+
+    if (values.kind === "ui") {
+      common.codeBytes = 820 + items * 150;
+      common.dataFlashBytes = storage === "flash" ? items * 48 : storage === "hybrid" ? items * 18 : 0;
+      common.ramBytes = 80 + Math.min(160, items * 10);
+      common.eepromBytes = storage === "eeprom" || storage === "hybrid" ? 24 + items * 2 : 16;
+      common.networkBytes = storage === "mqtt" ? payloadBytes : 0;
+      common.refreshBytes = Math.min(EPD_FRAME_BYTES, 320 + items * 64);
+      common.refreshMs = 450 + Math.min(400, items * 20);
+      common.refreshKind = "partial";
+      common.refreshName = "局刷 0x0f";
+      common.cpuMs = 80 + items * 12;
+      common.notes.push("适合做菜单/状态页，刷新应保持完整 old/new 基线");
+      return common;
+    }
+
+    if (values.kind === "vocab") {
+      common.codeBytes = 1180;
+      common.dataFlashBytes =
+        storage === "flash" ? items * 56 : storage === "hybrid" ? Math.ceil(items * 18) : 0;
+      common.ramBytes = 128 + Math.min(180, Math.ceil(items / 4));
+      common.eepromBytes = 24 + items * 4;
+      common.networkBytes = storage === "mqtt" || storage === "hybrid" ? payloadBytes : 0;
+      common.refreshBytes = 780;
+      common.refreshMs = 620;
+      common.refreshKind = "partial";
+      common.refreshName = "词卡局刷";
+      common.cpuMs = 140;
+      common.notes.push("词条建议 UTF-8 压缩包远程下发，EEPROM 只存复习状态");
+      return common;
+    }
+
+    if (values.kind === "image") {
+      const perImageBytes = payloadBytes > 0 ? payloadBytes : EPD_FRAME_BYTES;
+      common.codeBytes = 760;
+      common.dataFlashBytes =
+        storage === "flash" ? items * perImageBytes : storage === "hybrid" ? items * 384 + Math.min(2048, perImageBytes) : 0;
+      common.ramBytes = 96 + (storage === "flash" ? 64 : 256);
+      common.eepromBytes = 16 + items * (storage === "eeprom" ? 32 : 4);
+      common.networkBytes = storage === "mqtt" || storage === "hybrid" ? perImageBytes : 0;
+      common.refreshBytes = EPD_FRAME_BYTES;
+      common.refreshMs = 2600;
+      common.refreshKind = "full";
+      common.refreshName = "整屏换图";
+      common.cpuMs = 220;
+      common.notes.push("2.9 黑白整帧 4736B，Flash 里多图很快吃满空间");
+      if (storage === "eeprom") {
+        common.notes.push("EEPROM 不适合存整图，只能放图片索引/校验");
+      }
+      return common;
+    }
+
+    if (values.kind === "ota") {
+      common.codeBytes = 3600;
+      common.dataFlashBytes = 0;
+      common.ramBytes = 420;
+      common.eepromBytes = 48;
+      common.networkBytes = payloadBytes || 22 * 1024;
+      common.cpuMs = 1800;
+      common.notes.push("ATmega328P 全量固件 OTA 需要 bootloader SPM 和外部暂存/分块校验");
+      common.notes.push("更现实的是远程配置、词库、图片素材更新");
+      return common;
+    }
+
+    common.codeBytes = 2800;
+    common.dataFlashBytes =
+      storage === "flash" ? items * 56 + EPD_FRAME_BYTES : storage === "hybrid" ? Math.ceil(items * 18) + 1600 : 0;
+    common.ramBytes = 320;
+    common.eepromBytes = 64 + items * 4;
+    common.networkBytes = storage === "mqtt" || storage === "hybrid" ? payloadBytes : 0;
+    common.refreshBytes = EPD_FRAME_BYTES;
+    common.refreshMs = 2800;
+    common.refreshKind = "full";
+    common.refreshName = "组合界面整刷";
+    common.cpuMs = 460;
+    common.notes.push("组合功能要先做资源预算，优先远程数据 + 本地状态索引");
+    return common;
+  }
+
+  renderFeaturePreview(values, estimate) {
+    const ctx = this.featurePreviewCtx;
+    const { width, height } = prepareCanvasForDisplay(ctx);
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "#d9dacd";
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "rgba(27, 36, 32, 0.06)";
+    for (let y = 0; y < height; y += 6) {
+      for (let x = (y / 6) % 2 === 0 ? 0 : 3; x < width; x += 6) {
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+    ctx.fillStyle = "#141817";
+    ctx.fillRect(0, 0, width, 24);
+    ctx.fillStyle = "#f1f4ef";
+    ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
+    ctx.fillText(values.label, 10, 16);
+    ctx.fillStyle = estimate.severity === "bad" ? "#a72626" : estimate.severity === "warn" ? "#a34d18" : "#19706a";
+    ctx.fillRect(width - 74, 7, 62, 10);
+    ctx.fillStyle = "#141817";
+    ctx.font = "9px ui-sans-serif, system-ui, sans-serif";
+    ctx.fillText(estimate.severity.toUpperCase(), width - 68, 15);
+    ctx.fillStyle = "#1b2420";
+
+    if (values.kind === "vocab") {
+      ctx.font = "bold 24px ui-sans-serif, system-ui, sans-serif";
+      ctx.fillText("abandon", 18, 58);
+      ctx.font = "13px ui-sans-serif, system-ui, sans-serif";
+      ctx.fillText(`${values.items} cards  due today  12`, 18, 82);
+      ctx.strokeRect(18, 94, width - 36, 14);
+      ctx.fillRect(18, 94, Math.max(18, (width - 36) * 0.36), 14);
+    } else if (values.kind === "image") {
+      const left = 18;
+      const top = 36;
+      const cell = Math.max(7, Math.floor((height - 50) / 7));
+      for (let row = 0; row < 7; row += 1) {
+        for (let col = 0; col < 15; col += 1) {
+          if ((row + col) % 3 === 0) {
+            ctx.fillRect(left + col * cell, top + row * cell, cell, cell);
+          }
+        }
+      }
+      ctx.font = "bold 16px ui-sans-serif, system-ui, sans-serif";
+      ctx.fillText(`slot 1/${values.items}`, width - 92, 70);
+    } else if (values.kind === "ota") {
+      ctx.font = "bold 18px ui-sans-serif, system-ui, sans-serif";
+      ctx.fillText("OTA-lite", 18, 56);
+      ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
+      ctx.fillText("config / assets / vocab", 18, 76);
+      ctx.strokeRect(18, 92, width - 36, 16);
+      ctx.fillRect(18, 92, Math.max(12, (width - 36) * 0.22), 16);
+    } else if (values.kind === "combo") {
+      ctx.font = "bold 14px ui-sans-serif, system-ui, sans-serif";
+      ctx.fillText("HOME", 18, 48);
+      ctx.fillText("WORD", 18, 72);
+      ctx.fillText("PIC", 18, 96);
+      ctx.strokeRect(86, 38, width - 112, 58);
+      ctx.fillRect(98, 48, width - 136, 5);
+      ctx.fillRect(98, 62, width - 160, 5);
+      ctx.fillRect(98, 76, width - 128, 5);
+    } else {
+      ctx.font = "bold 16px ui-sans-serif, system-ui, sans-serif";
+      ctx.fillText("12:25", 18, 54);
+      ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
+      ctx.fillText("Review  Send  Settings", 18, 78);
+      ctx.strokeRect(18, 92, width - 36, 18);
+      ctx.fillText(`${values.items} pages`, 28, 105);
+    }
+
+    ctx.fillStyle = "#1b2420";
+    ctx.font = "10px ui-monospace, SFMono-Regular, Consolas, monospace";
+    ctx.fillText(`${formatBytes(estimate.totalFlashBytes)} flash  ${formatBytes(estimate.ramBytes)} ram`, 10, height - 8);
   }
 
   renderFrames(snapshot) {
@@ -1362,6 +1705,23 @@ function hex2(value) {
 
 function hex4(value) {
   return `0x${Number(value).toString(16).padStart(4, "0")}`;
+}
+
+function formatBytes(bytes) {
+  const value = Math.max(0, Math.round(Number(bytes) || 0));
+  if (value >= 1024) {
+    const kib = value / 1024;
+    return `${kib >= 10 ? kib.toFixed(0) : kib.toFixed(1)} KiB`;
+  }
+  return `${value} B`;
+}
+
+function clampNumber(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, n));
 }
 
 function timerLine(timer) {

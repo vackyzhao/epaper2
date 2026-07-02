@@ -114,6 +114,61 @@
           </div>
         </div>
 
+        <div class="panel feature-lab-panel">
+          <div class="panel-head">
+            <h2>高级功能数字孪生</h2>
+            <span id="featureVerdict" class="state-pill">waiting for firmware</span>
+          </div>
+          <div class="feature-lab-grid">
+            <div class="feature-lab-left">
+              <div class="readout-grid feature-control-grid">
+                <label>
+                  功能场景
+                  <select id="featureSelect">
+                    <option value="ui" selected>多页面 UI</option>
+                    <option value="vocab">背单词卡片</option>
+                    <option value="image">图片槽切换</option>
+                    <option value="ota">Air780 OTA</option>
+                    <option value="combo">UI + 背单词 + 图片</option>
+                  </select>
+                </label>
+                <label>
+                  条目/页面数量
+                  <input id="featureItems" type="number" min="1" max="600" value="4">
+                </label>
+                <label>
+                  载荷 KB
+                  <input id="featurePayloadKb" type="number" min="0" max="64" step="0.1" value="0">
+                </label>
+                <label>
+                  存储策略
+                  <select id="featureStorage">
+                    <option value="flash" selected>Flash 内置</option>
+                    <option value="eeprom">EEPROM 状态</option>
+                    <option value="mqtt">MQTT 拉取</option>
+                    <option value="hybrid">混合缓存</option>
+                  </select>
+                </label>
+              </div>
+              <div class="control-grid feature-action-grid">
+                <button id="featureApplyBtn" type="button">重算模型</button>
+              </div>
+              <div class="status-table compact-table feature-cost-table">
+                <div><span>Flash 成本</span><strong id="featureFlashCost">--</strong></div>
+                <div><span>SRAM 成本</span><strong id="featureRamCost">--</strong></div>
+                <div><span>EEPROM 成本</span><strong id="featureEepromCost">--</strong></div>
+                <div><span>LTE 成本</span><strong id="featureNetworkCost">--</strong></div>
+                <div><span>屏幕刷新</span><strong id="featureRefreshCost">--</strong></div>
+                <div><span>一次操作电量</span><strong id="featureEnergyCost">--</strong></div>
+              </div>
+            </div>
+            <div class="feature-lab-right">
+              <canvas id="featurePreviewCanvas" width="296" height="128" aria-label="Advanced feature e-paper preview"></canvas>
+              <div id="featureNotes" class="feature-notes">--</div>
+            </div>
+          </div>
+        </div>
+
         <div class="panel rtc-panel">
           <div class="panel-head">
             <h2>DS3231 RTC</h2>
@@ -509,7 +564,7 @@
         </div>
       </section>
     </main>
-    <script src="avr_engine.bundle.js?v=avr8"></script>
-    <script src="app.js?v=avr8"></script>
+    <script src="avr_engine.bundle.js?v=avr9"></script>
+    <script src="app.js?v=avr9"></script>
   </body>
 </html>
